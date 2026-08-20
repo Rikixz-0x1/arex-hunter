@@ -46,13 +46,18 @@ offline or working in a locked-down environment.
 
 One binary, same interface everywhere — Windows, Linux and macOS:
 
-- **Windows** — PowerShell shell, detects scoop / chocolatey / winget
+- **Windows** — PowerShell shell, detects scoop / chocolatey / winget, checks
+  admin elevation, `run_elevated` triggers a UAC prompt
 - **Linux** — detects the distro from `/etc/os-release` (Arch, Ubuntu, Kali,
   Fedora, Debian, Alpine, ...) and picks the right package manager (pacman, apt,
-  dnf, apk, zypper)
+  dnf, apk, zypper); `run_elevated` uses passwordless sudo/doas, or runs
+  directly when AREX is started as root
 - **macOS** — zsh shell, `sw_vers` kernel & version, Homebrew detection
 
-The agent knows which platform it's on (`system_info`) and adapts its commands.
+The agent knows which platform and privilege level it's on (`system_info`) and
+adapts its commands. Kernel-level work (loading modules, device changes,
+service management) goes through `run_elevated` — ordinary dev and file work
+never needs it.
 
 ## Requirements
 
@@ -128,6 +133,7 @@ go build -o arex.exe .
 | `grep` | Regex search inside files (skips `.git`, `node_modules`, binaries) |
 | `cd` | Change the working directory |
 | `run_command` | Run a shell command (60s timeout, right shell per platform) |
+| `run_elevated` | Run a command as admin/root — UAC prompt on Windows, passwordless sudo/doas on Linux, direct when already root |
 | `web_search` | Web search with result dedup (DuckDuckGo, instant-answer fallback) |
 | `fetch_url` | Fetch a page's readable text |
 | `http_request` | Custom HTTP calls (GET/POST/PUT/DELETE) with headers & body for API/web-app testing |

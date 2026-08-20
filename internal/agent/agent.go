@@ -174,6 +174,20 @@ var ToolDefs = []ollama.Tool{
 	{
 		Type: "function",
 		Function: ollama.Function{
+			Name:        "run_elevated",
+			Description: "Run a shell command with administrator/root privileges. On Windows this triggers a UAC prompt the user must accept. On Linux/macOS it uses passwordless sudo or doas (or runs directly if already root). Use ONLY for tasks that genuinely need admin rights: installing system packages, editing system configs, loading kernel modules (modprobe/insmod/rmmod), starting/stopping services, registry or device changes. Times out after 60 seconds.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{"type": "string", "description": "Shell command to run elevated"},
+				},
+				"required": []string{"command"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ollama.Function{
 			Name:        "learn",
 			Description: "Store a note in AREX's long-term memory (file .arex-memory.md in the working directory). Use to remember user preferences, project quirks, known-good commands, facts learned about the target, or anything useful for future sessions. This makes AREX smarter over time.",
 			Parameters: map[string]any{
@@ -251,6 +265,7 @@ Rules:
 8. Always wrap code in triple-backtick fenced blocks - never indent code with spaces. Always finish your answer with a complete final sentence - never stop mid-sentence or mid-code-block.
 9. Think first, act smart: at the start of a task call project_info and recall to understand the project and what you already know. Use system_info to check which tools are installed before suggesting commands.
 10. Be a long-term partner: when you learn something about the user, the project or the target (preferences, quirks, credentials format, known-good commands, recon findings), save it with the learn tool so you remember it in future sessions. Memory lives in .arex-memory.md.
+11. Privilege handling: use run_elevated only when a task truly needs admin/root rights (system packages, kernel modules, services, system configs). On Windows the user must click a UAC prompt - warn them first. Never use elevation for ordinary file or dev work.
 
 To call a tool, output a single JSON object with "name" and "arguments" fields, nothing else. For example:
 {"name": "web_search", "arguments": {"query": "CVE-2024-1234 exploit"}}
@@ -381,6 +396,8 @@ func (a *Agent) execTool(name, rawArgs string) string {
 		return a.writeFile(args["path"], args["content"])
 	case "run_command":
 		return a.runCommand(args["command"])
+	case "run_elevated":
+		return a.runElevated(args["command"])
 	case "web_search":
 		return a.webSearch(args["query"])
 	case "fetch_url":
@@ -595,6 +612,7 @@ func (a *Agent) systemInfo() string {
 	if si.PackageMgr != "" {
 		fmt.Fprintf(&sb, "package manager: %s\n", si.PackageMgr)
 	}
+	fmt.Fprintf(&sb, "privileges: %s\n", si.Privileges)
 	for _, cmd := range []string{"go version", "python --version", "node --version", "git --version", "curl --version", "nmap --version"} {
 		if out, ok := a.tryRun(cmd); ok {
 			line := strings.TrimSpace(strings.Split(out, "\n")[0])
@@ -613,6 +631,7 @@ type SystemInfo struct {
 	Distro     string
 	Shell      string
 	PackageMgr string
+	Privileges string
 	Hostname   string
 }
 
@@ -623,6 +642,7 @@ func (a *Agent) detectSystem() SystemInfo {
 		Shell:  shellFor(runtime.GOOS),
 		Hostname: hostname(),
 	}
+	si.Privileges = a.detectPrivileges()
 	switch runtime.GOOS {
 	case "windows":
 		if out, ok := a.tryRun("cmd /c ver"); ok {
@@ -847,6 +867,86 @@ func (a *Agent) runCommand(command string) string {
 	}
 	if err != nil {
 		return fmt.Sprintf("error: command exited with: %v\n%s", err, truncate(string(out), MaxToolOutput))
+	}
+	return truncate(string(out), MaxToolOutput)
+}
+
+func (a *Agent) detectPrivileges() string {
+	if runtime.GOOS == "windows" {
+		out, ok := a.tryRun("(New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)")
+		if ok && strings.TrimSpace(out) == "True" {
+			return "admin (elevated)"
+		}
+		return "user (UAC elevation available via run_elevated)"
+	}
+	if currentUserIsRoot() {
+		return "root (full access)"
+	}
+	if out, ok := a.tryRun("sudo -n true"); ok {
+		_ = out
+		return "user (passwordless sudo available)"
+	}
+	if out, ok := a.tryRun("doas -n true"); ok {
+		_ = out
+		return "user (passwordless doas available)"
+	}
+	return "user (no passwordless sudo - run AREX as root for full access)"
+}
+
+func (a *Agent) runElevated(command string) string {
+	if command == "" {
+		return "error: missing 'command' argument"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if runtime.GOOS == "windows" {
+		return a.runElevatedWindows(ctx, command)
+	}
+	return a.runElevatedUnix(ctx, command)
+}
+
+func (a *Agent) runElevatedWindows(ctx context.Context, command string) string {
+	tmpOut := filepath.Join(os.TempDir(), fmt.Sprintf("arex-elev-%d.txt", time.Now().UnixNano()))
+	script := filepath.Join(os.TempDir(), fmt.Sprintf("arex-elev-%d.ps1", time.Now().UnixNano()))
+	defer os.Remove(script)
+	defer os.Remove(tmpOut)
+	content := fmt.Sprintf("& { %s *> %q }\nexit $LASTEXITCODE\n", command, tmpOut)
+	if err := os.WriteFile(script, []byte(content), 0o600); err != nil {
+		return "error: " + err.Error()
+	}
+	ps := fmt.Sprintf("Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','%s'; exit $LASTEXITCODE", strings.ReplaceAll(script, "'", "''"))
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("error: elevation failed (UAC cancelled or denied): %v\n%s", err, truncate(string(out), MaxToolOutput))
+	}
+	data, rerr := os.ReadFile(tmpOut)
+	if rerr != nil {
+		return fmt.Sprintf("error: elevated command ran but produced no output: %v", rerr)
+	}
+	return truncate(string(data), MaxToolOutput)
+}
+
+func (a *Agent) runElevatedUnix(ctx context.Context, command string) string {
+	if currentUserIsRoot() {
+		return a.runCommand(command)
+	}
+	runner := ""
+	if _, ok := a.tryRun("sudo -n true"); ok {
+		runner = "sudo"
+	} else if _, ok := a.tryRun("doas -n true"); ok {
+		runner = "doas"
+	}
+	if runner == "" {
+		return "error: not root and no passwordless sudo/doas available. Run AREX as root or configure passwordless sudo."
+	}
+	cmd := exec.CommandContext(ctx, runner, "-n", "sh", "-c", command)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "error: elevated command timed out after 60 seconds\n" + truncate(string(out), MaxToolOutput)
+	}
+	if err != nil {
+		return fmt.Sprintf("error: elevated command exited with: %v\n%s", err, truncate(string(out), MaxToolOutput))
 	}
 	return truncate(string(out), MaxToolOutput)
 }

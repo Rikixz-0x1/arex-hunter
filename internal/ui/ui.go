@@ -444,6 +444,7 @@ func toolsReply() string {
 		"- `grep` - regex search inside files\n" +
 		"- `cd` - change the working directory\n" +
 		"- `run_command` - run a shell command (60s timeout)\n" +
+		"- `run_elevated` - run a command as admin/root (UAC prompt on Windows, sudo/doas on Linux)\n" +
 		"- `web_search` - search the web (OSINT, CVEs, docs)\n" +
 		"- `fetch_url` - fetch a page's readable text\n" +
 		"- `http_request` - custom HTTP calls (GET/POST/PUT/DELETE) for API & web app testing\n" +
