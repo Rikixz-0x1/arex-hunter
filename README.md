@@ -1,15 +1,35 @@
 # arex-hunter
 
-**AREX** — a local AI cyber security research & coding agent that runs in your terminal.
+**AREX** — a free, open-source AI agent for bug hunters, pentesters and small
+project researchers. Runs 100% on your machine, forever.
 
 Built by [Rikixz](https://khmersec.com) · [rikixz.dev](https://rikixz.dev)
 
-AREX is a fully-local terminal agent powered by [Ollama](https://ollama.com). It can
-research people/companies/CVEs on the web, read and edit files, run commands, search
-code, and write complete projects — all from one chat window with a streaming,
-markdown-rendering TUI.
+> No API keys. No token bills. No rate limits. No telemetry. Your prompts never
+> leave your machine.
 
-No cloud, no API keys, no telemetry. Everything runs on your machine.
+Cloud AIs charge you per token, cut you off mid-recon, and see everything you
+send. AREX runs entirely through [Ollama](https://ollama.com) on your own
+hardware — unlimited tokens, private by default, and still useful when you're
+offline or working in a locked-down environment.
+
+## What it's for
+
+**Bug hunting & security research**
+- Research targets: people, companies, domains, CVEs via `web_search` + `fetch_url`
+- Recon a scope folder: `grep`, `read_file`, `list_dir` across a codebase
+- Write and run PoCs, decoders, fuzzers — `write_file` + `run_command`
+- CTF: analyze challenges, decode flags, test exploits locally
+
+**Small project research**
+- Drop AREX into any repo and ask: *"what does this do?", "where is the auth logic?", "why does this test fail?"*
+- Explore code with regex search and file reads without dumping everything into context
+- Build features, fix bugs, run builds/tests — all in one chat
+
+**When other AIs are limited**
+- Out of tokens at midnight? AREX doesn't have a quota.
+- No internet? Everything except `web_search` works fully offline.
+- Sensitive data? Nothing is sent to a cloud provider, ever.
 
 ## Features
 
@@ -21,7 +41,6 @@ No cloud, no API keys, no telemetry. Everything runs on your machine.
 - **Anti-loop & truncation guards** — repeated tool calls are stopped, replies are
   flagged when the model cuts itself off
 - **One-shot mode** — `arex.exe "prompt"` for scripts and automation
-- **Offline by default** — only `web_search` / `fetch_url` touch the internet
 
 ## Requirements
 
@@ -32,6 +51,9 @@ No cloud, no API keys, no telemetry. Everything runs on your machine.
 ```powershell
 ollama pull qwen2.5-coder:7b
 ```
+
+Small models (3b/7b) run fine on 8 GB RAM and give you an unlimited-token
+assistant on basically any laptop — even one without internet.
 
 ## Build & run
 
@@ -97,6 +119,9 @@ go build -o arex.exe .
 | `web_search` | Web search with result dedup (DuckDuckGo, instant-answer fallback) |
 | `fetch_url` | Fetch a page's readable text |
 
+> Only `web_search` and `fetch_url` need internet. Everything else — file
+> exploration, coding, command execution — works fully offline.
+
 ## Architecture
 
 ```
@@ -129,8 +154,11 @@ Guards include:
   .\arex.exe -model qwen2.5-coder:14b
   ```
 
+- On a mid-range gaming laptop (RTX 3060+) try a `7b` or `14b` model at full speed;
+  on CPU-only machines a `3b` quantized model still gives unlimited-token research.
 - Web access is only used by `web_search` and `fetch_url`; if the search engine
   blocks the request, AREX falls back to the DuckDuckGo instant-answer API.
+- Use `/new` between different tasks to keep context clean and replies fast.
 
 ## License
 
