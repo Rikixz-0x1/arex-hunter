@@ -445,7 +445,11 @@ func toolsReply() string {
 		"- `cd` - change the working directory\n" +
 		"- `run_command` - run a shell command (60s timeout)\n" +
 		"- `web_search` - search the web (OSINT, CVEs, docs)\n" +
-		"- `fetch_url` - fetch a page's readable text"
+		"- `fetch_url` - fetch a page's readable text\n" +
+		"- `http_request` - custom HTTP calls (GET/POST/PUT/DELETE) for API & web app testing\n" +
+		"- `learn` / `recall` - long-term memory (.arex-memory.md)\n" +
+		"- `system_info` - OS, shell, installed tools\n" +
+		"- `project_info` - project manifest & dependencies"
 }
 
 func (m *Model) send(text string) tea.Cmd {

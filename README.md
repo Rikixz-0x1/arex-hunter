@@ -42,6 +42,18 @@ offline or working in a locked-down environment.
   flagged when the model cuts itself off
 - **One-shot mode** — `arex.exe "prompt"` for scripts and automation
 
+## Platforms
+
+One binary, same interface everywhere — Windows, Linux and macOS:
+
+- **Windows** — PowerShell shell, detects scoop / chocolatey / winget
+- **Linux** — detects the distro from `/etc/os-release` (Arch, Ubuntu, Kali,
+  Fedora, Debian, Alpine, ...) and picks the right package manager (pacman, apt,
+  dnf, apk, zypper)
+- **macOS** — zsh shell, `sw_vers` kernel & version, Homebrew detection
+
+The agent knows which platform it's on (`system_info`) and adapts its commands.
+
 ## Requirements
 
 - [Go](https://go.dev/dl/) 1.23+
@@ -115,9 +127,14 @@ go build -o arex.exe .
 | `mkdir` | Create a directory |
 | `grep` | Regex search inside files (skips `.git`, `node_modules`, binaries) |
 | `cd` | Change the working directory |
-| `run_command` | Run a shell command (60s timeout) |
+| `run_command` | Run a shell command (60s timeout, right shell per platform) |
 | `web_search` | Web search with result dedup (DuckDuckGo, instant-answer fallback) |
 | `fetch_url` | Fetch a page's readable text |
+| `http_request` | Custom HTTP calls (GET/POST/PUT/DELETE) with headers & body for API/web-app testing |
+| `learn` | Save a note to long-term memory (`.arex-memory.md`) so future sessions remember it |
+| `recall` | Read back what AREX has learned in past sessions |
+| `system_info` | Detect OS, distro, kernel, shell, package manager, installed tools |
+| `project_info` | Read project manifests (go.mod, package.json, ...) to understand the codebase |
 
 > Only `web_search` and `fetch_url` need internet. Everything else — file
 > exploration, coding, command execution — works fully offline.
@@ -144,6 +161,8 @@ Guards include:
   answering, it's nudged to write a real reply
 - **Truncation flag** — incomplete replies are marked `*(reply may have been cut
   off)*`
+- **Long-term memory** — facts saved with `learn` are loaded into every future
+  session, so AREX gets smarter about your project and preferences over time
 
 ## Tips
 

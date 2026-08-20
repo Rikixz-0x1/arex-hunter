@@ -154,6 +154,70 @@ var ToolDefs = []ollama.Tool{
 			},
 		},
 	},
+	{
+		Type: "function",
+		Function: ollama.Function{
+			Name:        "http_request",
+			Description: "Send a custom HTTP request (GET/POST/PUT/DELETE) to any URL with optional headers and body. Use for testing APIs, web apps and endpoints during authorized security assessments. Returns status code, content-type and the response body.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"url":     map[string]any{"type": "string", "description": "Full URL to request, e.g. https://api.example.com/login"},
+					"method":  map[string]any{"type": "string", "description": "HTTP method, default GET. Examples: GET, POST, PUT, DELETE"},
+					"headers": map[string]any{"type": "object", "description": "Optional request headers as key/value pairs, e.g. {\"Authorization\": \"Bearer xyz\"}"},
+					"body":    map[string]any{"type": "string", "description": "Optional request body (JSON, form data, etc.)"},
+				},
+				"required": []string{"url"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ollama.Function{
+			Name:        "learn",
+			Description: "Store a note in AREX's long-term memory (file .arex-memory.md in the working directory). Use to remember user preferences, project quirks, known-good commands, facts learned about the target, or anything useful for future sessions. This makes AREX smarter over time.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"note": map[string]any{"type": "string", "description": "The fact or note to remember, e.g. 'The user prefers PowerShell scripts'"},
+				},
+				"required": []string{"note"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ollama.Function{
+			Name:        "recall",
+			Description: "Read AREX's long-term memory (.arex-memory.md). Returns notes saved from this or previous sessions. Use to remember preferences and project context.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ollama.Function{
+			Name:        "system_info",
+			Description: "Get information about the machine: OS, architecture, shell, git branch, and installed tool versions (go, python, node, git, curl, nmap). Use before suggesting or running commands to pick the right syntax.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ollama.Function{
+			Name:        "project_info",
+			Description: "Read the project's manifest files (go.mod, package.json, requirements.txt, pyproject.toml, Cargo.toml, Dockerfile, README) to understand what the project is, its language and dependencies. Call this at the start of a task to understand the codebase.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{},
+			},
+		},
+	},
 }
 
 type Callbacks struct {
@@ -163,18 +227,17 @@ type Callbacks struct {
 }
 
 type Agent struct {
-	client   *ollama.Client
-	workdir  string
-	callbacks Callbacks
-	system   string
+	client     *ollama.Client
+	workdir    string
+	callbacks  Callbacks
+	system     string
+	memoryPath string
 }
 
 func New(client *ollama.Client, workdir string, cb Callbacks) *Agent {
-	shell := "sh"
-	if runtime.GOOS == "windows" {
-		shell = "PowerShell"
-	}
-	system := fmt.Sprintf(`You are AREX, an autonomous cyber security researcher and developer agent running inside a terminal. The user works in the directory %q. The shell for commands is %s.
+	shell := shellFor(runtime.GOOS)
+	system := fmt.Sprintf(`You are AREX, an autonomous cyber security researcher and developer agent running inside a terminal. The user works in the directory %q.
+Platform: %s on %s, shell is %s. If a command fails, check the platform and adapt (e.g. PowerShell on Windows, bash/zsh on Linux/macOS, different package managers per distro).
 You were created by Rikixz, a security researcher from KhmerSec (khmersec.com / rikixz.dev). If asked who you are or who made you, say you are AREX made by Rikixz - never claim to be ChatGPT, Claude or any other AI.
 You help with: security research and OSINT, CTF challenges, red team tooling and exploit development for authorized engagements (your own labs, CTFs, bug bounty targets), penetration testing helpers, and web development.
 Rules:
@@ -186,11 +249,13 @@ Rules:
 6. Research smartly: when asked to research or find info about something (people, companies, CVEs, topics), use web_search with one focused query, then fetch_url on the best results. Never repeat the same search query - if results are poor, refine the query instead. Only cite unique sources, never repeat a source.
 7. Never call the same tool with the same arguments twice. If a tool fails, adapt - use a different approach.
 8. Always wrap code in triple-backtick fenced blocks - never indent code with spaces. Always finish your answer with a complete final sentence - never stop mid-sentence or mid-code-block.
+9. Think first, act smart: at the start of a task call project_info and recall to understand the project and what you already know. Use system_info to check which tools are installed before suggesting commands.
+10. Be a long-term partner: when you learn something about the user, the project or the target (preferences, quirks, credentials format, known-good commands, recon findings), save it with the learn tool so you remember it in future sessions. Memory lives in .arex-memory.md.
 
 To call a tool, output a single JSON object with "name" and "arguments" fields, nothing else. For example:
 {"name": "web_search", "arguments": {"query": "CVE-2024-1234 exploit"}}
-After receiving the tool result, continue working or answer.`, workdir, shell)
-	return &Agent{client: client, workdir: workdir, callbacks: cb, system: system}
+After receiving the tool result, continue working or answer.`, workdir, runtime.GOOS, runtime.GOARCH, shell)
+	return &Agent{client: client, workdir: workdir, callbacks: cb, system: system, memoryPath: filepath.Join(workdir, ".arex-memory.md")}
 }
 
 func (a *Agent) CheckModel() error {
@@ -213,6 +278,9 @@ func (a *Agent) ListModels() ([]string, error) {
 func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ollama.Message, ollama.Stats, error) {
 	msgs := make([]ollama.Message, 0, len(history)+8)
 	msgs = append(msgs, ollama.Message{Role: "system", Content: a.system})
+	if mem := a.readMemory(); mem != "" {
+		msgs = append(msgs, ollama.Message{Role: "system", Content: "MEMORY FROM PREVIOUS SESSIONS - facts you learned earlier, use them when relevant:\n" + mem})
+	}
 	msgs = append(msgs, history...)
 
 	dropSystem := func(full []ollama.Message) []ollama.Message {
@@ -323,6 +391,16 @@ func (a *Agent) execTool(name, rawArgs string) string {
 		return a.grep(args["pattern"])
 	case "cd":
 		return a.cd(args["path"])
+	case "learn":
+		return a.learn(args["note"])
+	case "recall":
+		return a.recall()
+	case "system_info":
+		return a.systemInfo()
+	case "project_info":
+		return a.projectInfo()
+	case "http_request":
+		return a.httpRequest(rawArgs)
 	default:
 		return fmt.Sprintf("error: unknown tool %q. Available tools: %s. Use one of these instead.", name, toolNames())
 	}
@@ -463,6 +541,271 @@ func (a *Agent) grep(pattern string) string {
 	return truncate(sb.String(), MaxToolOutput)
 }
 
+func (a *Agent) readMemory() string {
+	data, err := os.ReadFile(a.memoryPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func (a *Agent) learn(note string) string {
+	if note == "" {
+		return "error: missing 'note' argument"
+	}
+	if err := os.MkdirAll(filepath.Dir(a.memoryPath), 0o755); err != nil {
+		return "error: " + err.Error()
+	}
+	f, err := os.OpenFile(a.memoryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	defer f.Close()
+	entry := "- " + strings.TrimSpace(note)
+	if !strings.HasSuffix(entry, "\n") {
+		entry += "\n"
+	}
+	if _, err := f.WriteString(entry); err != nil {
+		return "error: " + err.Error()
+	}
+	return "Saved to long-term memory: " + strings.TrimSpace(note)
+}
+
+func (a *Agent) recall() string {
+	if mem := a.readMemory(); mem != "" {
+		return truncate(mem, MaxToolOutput)
+	}
+	return "Memory is empty. Use the learn tool to store facts and preferences."
+}
+
+func (a *Agent) systemInfo() string {
+	si := a.detectSystem()
+	var sb strings.Builder
+	if si.Hostname != "" {
+		fmt.Fprintf(&sb, "hostname: %s\n", si.Hostname)
+	}
+	fmt.Fprintf(&sb, "os: %s %s\n", si.OS, si.Arch)
+	if si.Distro != "" {
+		fmt.Fprintf(&sb, "distro: %s\n", si.Distro)
+	}
+	if si.Kernel != "" {
+		fmt.Fprintf(&sb, "kernel: %s\n", si.Kernel)
+	}
+	fmt.Fprintf(&sb, "shell: %s\n", si.Shell)
+	if si.PackageMgr != "" {
+		fmt.Fprintf(&sb, "package manager: %s\n", si.PackageMgr)
+	}
+	for _, cmd := range []string{"go version", "python --version", "node --version", "git --version", "curl --version", "nmap --version"} {
+		if out, ok := a.tryRun(cmd); ok {
+			line := strings.TrimSpace(strings.Split(out, "\n")[0])
+			if line != "" {
+				sb.WriteString(line + "\n")
+			}
+		}
+	}
+	return truncate(sb.String(), MaxToolOutput)
+}
+
+type SystemInfo struct {
+	OS         string
+	Arch       string
+	Kernel     string
+	Distro     string
+	Shell      string
+	PackageMgr string
+	Hostname   string
+}
+
+func (a *Agent) detectSystem() SystemInfo {
+	si := SystemInfo{
+		OS:     runtime.GOOS,
+		Arch:   runtime.GOARCH,
+		Shell:  shellFor(runtime.GOOS),
+		Hostname: hostname(),
+	}
+	switch runtime.GOOS {
+	case "windows":
+		if out, ok := a.tryRun("cmd /c ver"); ok {
+			si.Kernel = strings.TrimSpace(out)
+		}
+		si.PackageMgr = detectWindowsPkgMgr()
+	case "darwin":
+		if out, ok := a.tryRun("uname -r"); ok {
+			si.Kernel = strings.TrimSpace(out)
+		}
+		if out, ok := a.tryRun("sw_vers -productVersion"); ok {
+			si.Distro = "macOS " + strings.TrimSpace(out)
+		}
+		si.PackageMgr = "brew"
+	default:
+		if out, ok := a.tryRun("uname -r"); ok {
+			si.Kernel = strings.TrimSpace(out)
+		}
+		if data, err := os.ReadFile("/etc/os-release"); err == nil {
+			id, name, version := parseOSRelease(string(data))
+			si.Distro = name
+			if version != "" {
+				si.Distro += " " + version
+			}
+			si.PackageMgr = pkgMgrForDistro(id)
+		}
+	}
+	return si
+}
+
+func hostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+}
+
+func shellFor(goos string) string {
+	switch goos {
+	case "windows":
+		return "PowerShell"
+	case "darwin":
+		return "zsh"
+	default:
+		return "bash"
+	}
+}
+
+func parseOSRelease(content string) (id, name, version string) {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		val = strings.Trim(strings.TrimSpace(val), `"'`)
+		switch key {
+		case "ID":
+			id = val
+		case "NAME":
+			name = val
+		case "VERSION_ID":
+			version = val
+		case "PRETTY_NAME":
+			if name == "" {
+				name = val
+			}
+		}
+	}
+	if name == "" {
+		name = id
+	}
+	return id, name, version
+}
+
+func pkgMgrForDistro(id string) string {
+	switch id {
+	case "arch", "manjaro", "endeavouros", "cachyos":
+		return "pacman"
+	case "debian", "ubuntu", "kali", "linuxmint", "pop", "raspbian":
+		return "apt"
+	case "fedora", "rocky", "centos", "rhel", "almalinux":
+		return "dnf"
+	case "alpine":
+		return "apk"
+	case "opensuse", "opensuse-leap", "opensuse-tumbleweed", "suse":
+		return "zypper"
+	case "void":
+		return "xbps"
+	case "nixos":
+		return "nix"
+	}
+	return ""
+}
+
+func detectWindowsPkgMgr() string {
+	home := os.Getenv("USERPROFILE")
+	if home != "" {
+		if _, err := os.Stat(filepath.Join(home, "scoop")); err == nil {
+			return "scoop"
+		}
+	}
+	pd := os.Getenv("ProgramData")
+	if pd != "" {
+		if _, err := os.Stat(filepath.Join(pd, "chocolatey")); err == nil {
+			return "choco"
+		}
+	}
+	return "winget (if available)"
+}
+
+func (a *Agent) projectInfo() string {
+	var sb strings.Builder
+	for _, f := range []string{"go.mod", "package.json", "requirements.txt", "pyproject.toml", "Cargo.toml", "composer.json", "Dockerfile", "docker-compose.yml", "README.md"} {
+		data, err := os.ReadFile(filepath.Join(a.workdir, f))
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&sb, "=== %s ===\n%s\n\n", f, truncate(string(data), 4000))
+	}
+	if sb.Len() == 0 {
+		return "No project manifest found (go.mod, package.json, requirements.txt, etc.). Listing root files may help."
+	}
+	return truncate(sb.String(), MaxToolOutput)
+}
+
+func (a *Agent) httpRequest(rawArgs string) string {
+	var args struct {
+		URL     string            `json:"url"`
+		Method  string            `json:"method"`
+		Headers map[string]string `json:"headers"`
+		Body    string            `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
+		return "error: invalid tool arguments: " + err.Error()
+	}
+	if args.URL == "" {
+		return "error: missing 'url' argument"
+	}
+	method := strings.ToUpper(strings.TrimSpace(args.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	var rdr io.Reader
+	if args.Body != "" {
+		rdr = strings.NewReader(args.Body)
+	}
+	req, err := http.NewRequest(method, args.URL, rdr)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	req.Header.Set("User-Agent", userAgent)
+	for k, v := range args.Headers {
+		req.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<10))
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	ct := resp.Header.Get("Content-Type")
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "HTTP %d %s\nContent-Type: %s\n", resp.StatusCode, http.StatusText(resp.StatusCode), ct)
+	if strings.Contains(ct, "json") || strings.Contains(ct, "text") || strings.Contains(ct, "xml") ||
+		strings.Contains(ct, "html") || strings.Contains(ct, "javascript") || strings.Contains(ct, "urlencoded") {
+		sb.WriteString(string(data))
+	} else if len(data) > 64 && bytes.Contains(data[:64], []byte{0}) {
+		fmt.Fprintf(&sb, "<binary response, %d bytes>", len(data))
+	} else {
+		sb.WriteString(string(data))
+	}
+	return truncate(sb.String(), MaxToolOutput)
+}
+
 func (a *Agent) mkdir(path string) string {
 	if path == "" {
 		return "error: missing 'path' argument"
@@ -488,7 +831,13 @@ func (a *Agent) runCommand(command string) string {
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command)
 	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
+		sh := "sh"
+		if _, err := exec.LookPath("bash"); err == nil {
+			sh = "bash"
+		} else if _, err := exec.LookPath("zsh"); err == nil {
+			sh = "zsh"
+		}
+		cmd = exec.CommandContext(ctx, sh, "-c", command)
 	}
 	cmd.Dir = a.workdir
 	out, err := cmd.CombinedOutput()
@@ -500,6 +849,14 @@ func (a *Agent) runCommand(command string) string {
 		return fmt.Sprintf("error: command exited with: %v\n%s", err, truncate(string(out), MaxToolOutput))
 	}
 	return truncate(string(out), MaxToolOutput)
+}
+
+func (a *Agent) tryRun(command string) (string, bool) {
+	out := a.runCommand(command)
+	if strings.HasPrefix(out, "error:") {
+		return "", false
+	}
+	return out, true
 }
 
 func truncate(s string, max int) string {

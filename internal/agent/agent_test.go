@@ -103,6 +103,76 @@ func TestFixJSONEscapes(t *testing.T) {
 	}
 }
 
+func TestParseOSRelease(t *testing.T) {
+	cases := []struct {
+		content string
+		id, name, version string
+	}{
+		{
+			`NAME="Arch Linux"
+ID=arch
+PRETTY_NAME="Arch Linux"
+VERSION_ID="2026.08.01"`,
+			"arch", "Arch Linux", "2026.08.01",
+		},
+		{
+			`NAME="Ubuntu"
+ID=ubuntu
+VERSION_ID="24.04"`,
+			"ubuntu", "Ubuntu", "24.04",
+		},
+		{
+			`NAME="Kali GNU/Linux"
+ID=kali
+VERSION_ID="2025.1"`,
+			"kali", "Kali GNU/Linux", "2025.1",
+		},
+		{
+			`NAME="Fedora Linux"
+ID=fedora
+VERSION_ID="40"`,
+			"fedora", "Fedora Linux", "40",
+		},
+		{
+			`ID=debian`,
+			"debian", "debian", "",
+		},
+	}
+	for _, c := range cases {
+		id, name, version := parseOSRelease(c.content)
+		if id != c.id || name != c.name || version != c.version {
+			t.Errorf("parseOSRelease(%q) = (%q,%q,%q), want (%q,%q,%q)", c.content, id, name, version, c.id, c.name, c.version)
+		}
+	}
+}
+
+func TestPkgMgrForDistro(t *testing.T) {
+	cases := map[string]string{
+		"arch": "pacman", "manjaro": "pacman",
+		"ubuntu": "apt", "debian": "apt", "kali": "apt",
+		"fedora": "dnf", "rocky": "dnf",
+		"alpine": "apk", "opensuse": "zypper", "void": "xbps", "nixos": "nix",
+		"": "",
+	}
+	for id, want := range cases {
+		if got := pkgMgrForDistro(id); got != want {
+			t.Errorf("pkgMgrForDistro(%q) = %q, want %q", id, got, want)
+		}
+	}
+}
+
+func TestShellFor(t *testing.T) {
+	if got := shellFor("windows"); got != "PowerShell" {
+		t.Errorf("shellFor(windows) = %q, want PowerShell", got)
+	}
+	if got := shellFor("darwin"); got != "zsh" {
+		t.Errorf("shellFor(darwin) = %q, want zsh", got)
+	}
+	if got := shellFor("linux"); got != "bash" {
+		t.Errorf("shellFor(linux) = %q, want bash", got)
+	}
+}
+
 func TestIsPlaceholderReply(t *testing.T) {
 	bad := []string{"", "   ", "<tool_response>", "<tool_response>\n\n</tool_response>", "Tool result for web_search"}
 	good := []string{"KhmerSec is a security community.", "Here are the results:\n- khmersec.com\n- rikixz.dev"}
