@@ -1,9 +1,10 @@
-package agent
+﻿package agent
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"html"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"arex/internal/ollama"
+	xhtml "golang.org/x/net/html"
 )
 
 const (
@@ -130,7 +132,7 @@ var ToolDefs = []ollama.Tool{
 		Type: "function",
 		Function: ollama.Function{
 			Name:        "web_search",
-			Description: "Search the web for information. Returns up to 8 results with title, URL and snippet. Use for OSINT, researching CVEs and vulnerabilities, finding documentation, PoCs, write-ups and exploits.",
+			Description: "Search the web across multiple engines (DuckDuckGo, Bing, Mojeek, Wikipedia) with automatic fallback. Returns up to 8 results with title, URL and snippet. Use for OSINT, researching CVEs and vulnerabilities, finding documentation, PoCs, write-ups and exploits.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -144,7 +146,7 @@ var ToolDefs = []ollama.Tool{
 		Type: "function",
 		Function: ollama.Function{
 			Name:        "fetch_url",
-			Description: "Fetch a URL and return its readable text content. Use for reading web pages, documentation, API responses, advisories and reports. Returns content truncated at 12000 characters.",
+			Description: "Fetch a URL and extract the main readable article text (skips navigation, ads and scripts). Use for reading web pages, documentation, API responses, advisories and reports. Returns content truncated at 12000 characters.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -979,41 +981,92 @@ func (a *Agent) webSearch(query string) string {
 	if query == "" {
 		return "error: missing 'query' argument"
 	}
-	if out := a.ddgSearch(query); out != "" {
-		return out
+	// Try multiple engines until one returns results: html search, Bing RSS,
+	// DDG lite, Mojeek, DDG instant-answer API, then Wikipedia for definitions.
+	engines := []struct {
+		name string
+		run  func(string) string
+	}{
+		{"duckduckgo", a.ddgSearch},
+		{"bing", a.bingSearch},
+		{"duckduckgo lite", a.ddgLiteSearch},
+		{"mojeek", a.mojeekSearch},
+		{"duckduckgo instant", a.ddgInstant},
+		{"wikipedia", a.wikiSearch},
 	}
-	if out := a.ddgInstant(query); out != "" {
-		return out
+	for _, e := range engines {
+		if out := e.run(query); out != "" {
+			return "### " + e.name + " results for: " + query + "\n\n" + out
+		}
 	}
-	return "error: web search returned no results (search engine may have blocked the request)"
+	return "error: web search returned no results for: " + query + " (all engines blocked or empty)"
+}
+
+type searchResult struct {
+	title   string
+	url     string
+	snippet string
+}
+
+func (r searchResult) String() string {
+	return r.title + "\n  " + r.url + "\n  " + r.snippet
+}
+
+func formatResults(results []searchResult) string {
+	var sb strings.Builder
+	for i, r := range results {
+		fmt.Fprintf(&sb, "%d. %s\n   %s\n   %s\n\n", i+1, r.title, r.url, r.snippet)
+	}
+	return truncate(strings.TrimRight(sb.String(), "\n"), MaxToolOutput)
+}
+
+func cleanSnippet(s string) string {
+	s = html.UnescapeString(s)
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.TrimSpace(s)
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	return s
+}
+
+// httpGetBytes fetches a URL with a browser User-Agent, returns body or "" on failure.
+func httpGetBytes(rawURL string, maxBytes int64) []byte {
+	client := &http.Client{Timeout: 20 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return nil
+	}
+	return body
 }
 
 func (a *Agent) ddgSearch(query string) string {
-	client := &http.Client{Timeout: 20 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, "https://html.duckduckgo.com/html/?q="+url.QueryEscape(query), nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("User-Agent", userAgent)
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil || resp.StatusCode != http.StatusOK {
+	body := httpGetBytes("https://html.duckduckgo.com/html/?q="+url.QueryEscape(query), 2<<20)
+	if len(body) == 0 {
 		return ""
 	}
 
-	parts := strings.Split(string(body), `class="result__a"`)
-	if len(parts) < 2 {
-		return ""
-	}
-	type entry struct{ title, url, snippet string }
 	seen := map[string]bool{}
-	var entries []entry
-	for i := 1; i < len(parts) && len(entries) < 5; i++ {
-		part := parts[i]
+	var results []searchResult
+	for _, part := range strings.Split(string(body), `class="result__a"`)[1:] {
+		if len(results) >= 5 {
+			break
+		}
 		hrefStart := strings.Index(part, `href="`)
 		if hrefStart < 0 {
 			continue
@@ -1029,47 +1082,190 @@ func (a *Agent) ddgSearch(query string) string {
 		if titleStart < 0 || titleEnd < titleStart {
 			continue
 		}
-		title := strings.TrimSpace(stripHTML(rest[titleStart+1 : titleEnd]))
+		title := cleanSnippet(stripHTML(rest[titleStart+1 : titleEnd]))
 		snippet := ""
 		if sIdx := strings.Index(part, `class="result__snippet"`); sIdx >= 0 {
 			sp := part[sIdx:]
 			st := strings.IndexByte(sp, '>')
 			se := strings.Index(sp, `</a>`)
 			if st >= 0 && se > st {
-				snippet = strings.TrimSpace(stripHTML(sp[st+1 : se]))
+				snippet = cleanSnippet(stripHTML(sp[st+1 : se]))
 			}
 		}
 		u := decodeDDGLink(href)
+		if u == "" || seen[u] || title == "" {
+			continue
+		}
+		seen[u] = true
+		results = append(results, searchResult{title: title, url: u, snippet: snippet})
+	}
+	if len(results) == 0 {
+		return ""
+	}
+	return formatResults(results)
+}
+
+func (a *Agent) bingSearch(query string) string {
+	body := httpGetBytes("https://www.bing.com/search?q="+url.QueryEscape(query)+"&format=rss&count=8", 1<<20)
+	if len(body) == 0 {
+		return ""
+	}
+	results := parseBingRSS(body)
+	if len(results) == 0 {
+		return ""
+	}
+	return formatResults(results)
+}
+
+func parseBingRSS(body []byte) []searchResult {
+	var feed struct {
+		Channel struct {
+			Items []struct {
+				Title       string `xml:"title"`
+				Link        string `xml:"link"`
+				Description string `xml:"description"`
+			} `xml:"item"`
+		} `xml:"channel"`
+	}
+	if err := xml.Unmarshal(body, &feed); err != nil || len(feed.Channel.Items) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var results []searchResult
+	for _, it := range feed.Channel.Items {
+		if len(results) >= 8 {
+			break
+		}
+		u := strings.TrimSpace(it.Link)
 		if u == "" || seen[u] {
 			continue
 		}
 		seen[u] = true
-		entries = append(entries, entry{title: title, url: u, snippet: snippet})
+		results = append(results, searchResult{title: cleanSnippet(it.Title), url: u, snippet: cleanSnippet(it.Description)})
 	}
-	var sb strings.Builder
-	for i, e := range entries {
-		fmt.Fprintf(&sb, "%d. %s\n   %s\n   %s\n\n", i+1, e.title, e.url, e.snippet)
-	}
-	if sb.Len() == 0 {
+	return results
+}
+
+func (a *Agent) ddgLiteSearch(query string) string {
+	body := httpGetBytes("https://lite.duckduckgo.com/lite/?q="+url.QueryEscape(query), 1<<20)
+	if len(body) == 0 {
 		return ""
 	}
-	return truncate(sb.String(), MaxToolOutput)
+	s := string(body)
+	seen := map[string]bool{}
+	var results []searchResult
+	for _, part := range strings.Split(s, `<a rel="nofollow" href="`)[1:] {
+		if len(results) >= 8 {
+			break
+		}
+		hrefEnd := strings.IndexByte(part, '"')
+		if hrefEnd < 0 {
+			continue
+		}
+		u := part[:hrefEnd]
+		rest := part[hrefEnd+1:]
+		titleEnd := strings.Index(rest, `</a>`)
+		if titleEnd < 0 {
+			continue
+		}
+		title := cleanSnippet(stripHTML(rest[:titleEnd]))
+		if u == "" || seen[u] || title == "" {
+			continue
+		}
+		seen[u] = true
+		snippet := ""
+		if sIdx := strings.Index(rest, `class="result-snippet"`); sIdx >= 0 {
+			sp := rest[sIdx:]
+			st := strings.IndexByte(sp, '>')
+			se := strings.Index(sp, `</td>`)
+			if st >= 0 && se > st {
+				snippet = cleanSnippet(stripHTML(sp[st+1 : se]))
+			}
+		}
+		results = append(results, searchResult{title: title, url: u, snippet: snippet})
+	}
+	if len(results) == 0 {
+		return ""
+	}
+	return formatResults(results)
+}
+
+func (a *Agent) mojeekSearch(query string) string {
+	body := httpGetBytes("https://www.mojeek.com/search?q="+url.QueryEscape(query), 1<<20)
+	if len(body) == 0 {
+		return ""
+	}
+	s := string(body)
+	seen := map[string]bool{}
+	var results []searchResult
+	for _, part := range strings.Split(s, `class="ob"`)[1:] {
+		if len(results) >= 8 {
+			break
+		}
+		hrefStart := strings.Index(part, `href="`)
+		if hrefStart < 0 {
+			continue
+		}
+		rest := part[hrefStart+6:]
+		hrefEnd := strings.IndexByte(rest, '"')
+		if hrefEnd < 0 {
+			continue
+		}
+		u := rest[:hrefEnd]
+		titleStart := strings.IndexByte(rest, '>')
+		titleEnd := strings.Index(rest, `</a>`)
+		if titleStart < 0 || titleEnd < titleStart {
+			continue
+		}
+		title := cleanSnippet(stripHTML(rest[titleStart+1 : titleEnd]))
+		if u == "" || seen[u] || title == "" {
+			continue
+		}
+		seen[u] = true
+		snippet := ""
+		if sIdx := strings.Index(rest, `class="s"`); sIdx >= 0 {
+			sp := rest[sIdx:]
+			st := strings.IndexByte(sp, '>')
+			se := strings.Index(sp, `</p>`)
+			if st >= 0 && se > st {
+				snippet = cleanSnippet(stripHTML(sp[st+1 : se]))
+			}
+		}
+		results = append(results, searchResult{title: title, url: u, snippet: snippet})
+	}
+	if len(results) == 0 {
+		return ""
+	}
+	return formatResults(results)
+}
+
+func (a *Agent) wikiSearch(query string) string {
+	body := httpGetBytes("https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch="+url.QueryEscape(query)+"&format=json&srlimit=3&prop=snippet&srprop=snippet", 1<<20)
+	if len(body) == 0 {
+		return ""
+	}
+	var out struct {
+		Query struct {
+			Search []struct {
+				Title   string `json:"title"`
+				Snippet string `json:"snippet"`
+			} `json:"search"`
+		} `json:"query"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || len(out.Query.Search) == 0 {
+		return ""
+	}
+	var results []searchResult
+	for _, s := range out.Query.Search {
+		u := "https://en.wikipedia.org/wiki/" + url.PathEscape(strings.ReplaceAll(s.Title, " ", "_"))
+		results = append(results, searchResult{title: "Wikipedia: " + s.Title, url: u, snippet: cleanSnippet(s.Snippet)})
+	}
+	return formatResults(results)
 }
 
 func (a *Agent) ddgInstant(query string) string {
-	client := &http.Client{Timeout: 20 * time.Second}
-	u := "https://api.duckduckgo.com/?q=" + url.QueryEscape(query) + "&format=json&no_html=1&skip_disambig=1"
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("User-Agent", "arex-agent/0.1")
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	body := httpGetBytes("https://api.duckduckgo.com/?q="+url.QueryEscape(query)+"&format=json&no_html=1&skip_disambig=1", 1<<20)
+	if len(body) == 0 {
 		return ""
 	}
 	var out struct {
@@ -1082,21 +1278,21 @@ func (a *Agent) ddgInstant(query string) string {
 		} `json:"Results"`
 		RelatedTopics []json.RawMessage `json:"RelatedTopics"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
 		return ""
 	}
 
-	var sb strings.Builder
+	var results []searchResult
 	seen := map[string]bool{}
 	add := func(text, u string) {
 		if u == "" || seen[u] {
 			return
 		}
 		seen[u] = true
-		fmt.Fprintf(&sb, "- %s\n  %s\n", text, u)
+		results = append(results, searchResult{title: cleanSnippet(text), url: u})
 	}
 	if out.Abstract != "" {
-		fmt.Fprintf(&sb, "## %s\n%s\nSource: %s\n\n", out.Heading, out.Abstract, out.AbstractURL)
+		return fmt.Sprintf("## %s\n%s\nSource: %s", out.Heading, out.Abstract, out.AbstractURL)
 	}
 	for _, r := range out.Results {
 		add(r.Text, r.FirstURL)
@@ -1122,10 +1318,10 @@ func (a *Agent) ddgInstant(query string) string {
 			add(t.Text, t.FirstURL)
 		}
 	}
-	if sb.Len() == 0 {
+	if len(results) == 0 {
 		return ""
 	}
-	return truncate(sb.String(), MaxToolOutput)
+	return formatResults(results)
 }
 
 func (a *Agent) fetchURL(rawURL string) string {
@@ -1141,6 +1337,7 @@ func (a *Agent) fetchURL(rawURL string) string {
 		return "error: " + err.Error()
 	}
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8")
 	resp, err := client.Do(req)
 	if err != nil {
 		return "error: " + err.Error()
@@ -1151,9 +1348,171 @@ func (a *Agent) fetchURL(rawURL string) string {
 		return "error: " + err.Error()
 	}
 	if resp.StatusCode >= 400 {
-		return fmt.Sprintf("error: HTTP %d\n%s", resp.StatusCode, truncate(stripHTML(string(body)), 2000))
+		return fmt.Sprintf("error: HTTP %d %s\n%s", resp.StatusCode, resp.Status, truncate(htmlToText(string(body)), 2000))
 	}
-	return truncate(stripHTML(string(body)), 12000)
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "application/pdf") || strings.HasPrefix(ct, "application/zip") ||
+		strings.HasPrefix(ct, "application/octet-stream") || strings.HasPrefix(ct, "video/") || strings.HasPrefix(ct, "audio/") {
+		return fmt.Sprintf("content-type: %s (%d bytes) - not a readable text page", ct, len(body))
+	}
+	if len(body) > 64 && bytes.Contains(body[:64], []byte{0}) {
+		return fmt.Sprintf("content-type: %s (%d bytes) - appears to be binary data", ct, len(body))
+	}
+	text := extractArticleText(string(body))
+	if text == "" {
+		text = htmlToText(string(body))
+	}
+	return truncate(text, 12000)
+}
+
+var pageSkipTags = map[string]bool{
+	"script": true, "style": true, "nav": true, "footer": true, "header": true,
+	"aside": true, "form": true, "svg": true, "iframe": true, "noscript": true,
+	"button": true, "select": true, "option": true, "template": true, "canvas": true,
+}
+
+var pageBreakTags = map[string]bool{
+	"p": true, "div": true, "li": true, "tr": true, "br": true, "h1": true,
+	"h2": true, "h3": true, "h4": true, "h5": true, "h6": true, "section": true,
+	"article": true, "blockquote": true, "pre": true, "table": true, "ul": true,
+	"ol": true, "td": true, "th": true, "hr": true, "dl": true, "dt": true, "dd": true,
+}
+
+func htmlToText(s string) string {
+	z := xhtml.NewTokenizer(strings.NewReader(s))
+	var sb strings.Builder
+	skipDepth := 0
+	inPre := false
+	for {
+		tt := z.Next()
+		switch tt {
+		case xhtml.ErrorToken:
+			if z.Err() == io.EOF {
+				return postCleanText(sb.String())
+			}
+			return ""
+		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
+			name, _ := z.TagName()
+			tag := string(name)
+			if pageSkipTags[tag] {
+				if tt == xhtml.StartTagToken {
+					skipDepth++
+				}
+			}
+			if tag == "pre" {
+				inPre = true
+			}
+			if pageBreakTags[tag] {
+				sb.WriteByte('\n')
+			}
+		case xhtml.EndTagToken:
+			name, _ := z.TagName()
+			tag := string(name)
+			if pageSkipTags[tag] && skipDepth > 0 {
+				skipDepth--
+			}
+			if tag == "pre" {
+				inPre = false
+			}
+		case xhtml.TextToken:
+			if skipDepth > 0 {
+				continue
+			}
+			t := string(z.Text())
+			if !inPre {
+				t = reSpace.ReplaceAllString(t, " ")
+			}
+			sb.WriteString(t)
+		}
+	}
+}
+
+func postCleanText(s string) string {
+	s = html.UnescapeString(s)
+	s = reSpace.ReplaceAllString(s, " ")
+	s = reBlank.ReplaceAllString(s, "\n\n")
+	s = strings.ReplaceAll(s, " \n", "\n")
+	s = strings.ReplaceAll(s, "\n ", "\n")
+	return strings.TrimSpace(s)
+}
+
+// extractArticleText finds the main article/content region of a page (article,
+// main, or an element with id/class hinting at content) and returns its text.
+// Returns "" if no strong candidate is found.
+func extractArticleText(s string) string {
+	doc, err := xhtml.Parse(strings.NewReader(s))
+	if err != nil {
+		return ""
+	}
+	var best *xhtml.Node
+	bestScore := 0
+	var walk func(n *xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		if n.Type == xhtml.ElementNode {
+			id, cls := "", ""
+			for _, a := range n.Attr {
+				switch a.Key {
+				case "id":
+					id = a.Val
+				case "class":
+					cls = a.Val
+				}
+			}
+			lower := strings.ToLower(n.Data + " " + id + " " + cls)
+			isMain := n.Data == "article" || n.Data == "main" ||
+				strings.Contains(lower, "content") || strings.Contains(lower, "article")
+			if isMain {
+				if score := nodeTextLen(n); score > bestScore {
+					bestScore = score
+					best = n
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	if best == nil || bestScore < 300 {
+		return ""
+	}
+	var sb strings.Builder
+	renderNode(best, &sb)
+	return postCleanText(sb.String())
+}
+
+func nodeTextLen(n *xhtml.Node) int {
+	var count int
+	var walk func(n *xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		if n.Type == xhtml.TextNode {
+			count += len(n.Data)
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(n)
+	return count
+}
+
+func renderNode(n *xhtml.Node, sb *strings.Builder) {
+	switch n.Type {
+	case xhtml.TextNode:
+		sb.WriteString(n.Data)
+		return
+	case xhtml.ElementNode:
+		tag := n.Data
+		if pageSkipTags[tag] {
+			return
+		}
+		if pageBreakTags[tag] {
+			sb.WriteByte('\n')
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		renderNode(c, sb)
+	}
 }
 
 func decodeDDGLink(href string) string {

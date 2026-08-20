@@ -134,8 +134,8 @@ go build -o arex.exe .
 | `cd` | Change the working directory |
 | `run_command` | Run a shell command (60s timeout, right shell per platform) |
 | `run_elevated` | Run a command as admin/root — UAC prompt on Windows, passwordless sudo/doas on Linux, direct when already root |
-| `web_search` | Web search with result dedup (DuckDuckGo, instant-answer fallback) |
-| `fetch_url` | Fetch a page's readable text |
+| `web_search` | Multi-engine search with automatic fallback (DuckDuckGo → Bing RSS → DDG lite → Mojeek → DDG instant → Wikipedia), dedup, clean snippets |
+| `fetch_url` | Fetch a page and extract the main article text (skips nav, ads, scripts); detects binary content |
 | `http_request` | Custom HTTP calls (GET/POST/PUT/DELETE) with headers & body for API/web-app testing |
 | `learn` | Save a note to long-term memory (`.arex-memory.md`) so future sessions remember it |
 | `recall` | Read back what AREX has learned in past sessions |

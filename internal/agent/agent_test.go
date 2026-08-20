@@ -200,3 +200,71 @@ func TestAgentFetchURLErrors(t *testing.T) {
 		t.Errorf("empty query should error, got %q", got)
 	}
 }
+
+func TestBingRSSParse(t *testing.T) {
+	body := `<?xml version="1.0"?>
+<rss version="2.0"><channel><item>
+<title>SQL injection - Wikipedia</title>
+<link>https://en.wikipedia.org/wiki/SQL_injection</link>
+<description>SQL injection is a code injection technique used to attack data-driven applications.</description>
+</item><item>
+<title>CVE-2025-24813 - NVD</title>
+<link>https://nvd.nist.gov/vuln/detail/CVE-2025-24813</link>
+<description>Path Equivalence in Apache Tomcat leading to RCE.</description>
+</item></channel></rss>`
+	got := formatResults(parseBingRSS([]byte(body)))
+	if !strings.Contains(got, "SQL injection") || !strings.Contains(got, "en.wikipedia.org") {
+		t.Errorf("bing parse missing expected content, got:\n%s", got)
+	}
+	if !strings.Contains(got, "CVE-2025-24813") {
+		t.Errorf("bing parse missing second result, got:\n%s", got)
+	}
+}
+
+func TestHTMLToTextSkipsNoise(t *testing.T) {
+	page := `<html><head><style>body{color:red}</style></head><body>
+<script>var x = 1;</script>
+<nav><a href="/">Home</a><a href="/login">Login</a></nav>
+<main><article><h1>Hello World</h1><p>This is the actual content of the page.</p></article></main>
+<footer>Copyright 2026</footer>
+</body></html>`
+	got := htmlToText(page)
+	if !strings.Contains(got, "Hello World") || !strings.Contains(got, "actual content") {
+		t.Errorf("article text missing, got:\n%s", got)
+	}
+	if strings.Contains(got, "var x = 1") || strings.Contains(got, "Copyright") || strings.Contains(got, "Login") {
+		t.Errorf("noise was not removed, got:\n%s", got)
+	}
+}
+
+func TestExtractArticleText(t *testing.T) {
+	page := `<html><body>
+<nav>MENU MENU MENU MENU MENU</nav>
+<div id="content"><article><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p></article></div>
+<footer>FOOTER FOOTER FOOTER</footer>
+</body></html>`
+	got := extractArticleText(page)
+	if !strings.Contains(got, "Lorem ipsum") {
+		t.Errorf("article extraction failed, got:\n%s", got)
+	}
+	if strings.Contains(got, "MENU") || strings.Contains(got, "FOOTER") {
+		t.Errorf("noise leaked into article, got:\n%s", got)
+	}
+}
+
+func TestCleanSnippet(t *testing.T) {
+	got := cleanSnippet("Hello&nbsp;world  &amp;  friends\n\n   more   text")
+	if !strings.Contains(got, "Hello world & friends") {
+		t.Errorf("cleanSnippet output wrong: %q", got)
+	}
+}
+
+func TestFormatResults(t *testing.T) {
+	got := formatResults([]searchResult{
+		{title: "Title A", url: "https://a.com", snippet: "Snippet A"},
+		{title: "Title B", url: "https://b.com", snippet: "Snippet B"},
+	})
+	if !strings.Contains(got, "1. Title A") || !strings.Contains(got, "https://a.com") || !strings.Contains(got, "2. Title B") {
+		t.Errorf("formatResults output wrong:\n%s", got)
+	}
+}
