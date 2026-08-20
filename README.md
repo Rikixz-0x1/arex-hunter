@@ -33,8 +33,11 @@ offline or working in a locked-down environment.
 
 ## Features
 
-- **Streaming TUI** — glamour-rendered markdown, live token/s rate, spinner
-- **9 tools** — file ops, regex search, shell, web search, page fetching
+- **Streaming TUI** — glamour-rendered markdown, live token/s rate, spinner,
+  tool results shown in-chat so you always see the raw ground truth
+- **26 tools** — file ops, regex search, shell, web research, recon
+  (DNS/WHOIS/port scan/subdomain/geoip/CVE), payload generation,
+  encoding/hashing, HTTP testing, memory
 - **Slash commands** — `/model`, `/tools`, `/tokens`, `/new`, `/host`, `/exit`, ...
 - **Model picker** — `ctrl+p` / `tab`, swap between any installed Ollama models
 - **Sessions** — `ctrl+l` or `/new` for a clean context; per-session token stats
@@ -141,6 +144,16 @@ go build -o arex.exe .
 | `recall` | Read back what AREX has learned in past sessions |
 | `system_info` | Detect OS, distro, kernel, shell, package manager, installed tools |
 | `project_info` | Read project manifests (go.mod, package.json, ...) to understand the codebase |
+| `encode` / `decode` | base64 / base64url / hex / URL encoding — payload crafting, CTF flags |
+| `hash` | md5 / sha1 / sha256 / sha512 hashing |
+| `dns_lookup` | A, AAAA, MX, TXT, NS, CNAME records (pure Go) |
+| `whois` | Domain registration & OSINT (IANA referral, auto-clean) |
+| `port_scan` | TCP connect scan — 30 common ports or custom list/range |
+| `reverse_shell` | Payload generator: bash, nc, ncat, socat, python, perl, ruby, php, powershell, telnet, golang |
+| `cve_lookup` | NVD API — CVE details by ID or keyword (severity, CVSS, vector, references) |
+| `subdomain_scan` | DNS brute-force of 130+ common subdomains (admin, api, dev, vpn, git...) |
+| `geoip` | IP geolocation: country, city, ISP, org, ASN, proxy/hosting flags |
+| `security_headers` | HTTP security header audit (HSTS, CSP, XFO, COOP/CORP...) |
 
 > Only `web_search` and `fetch_url` need internet. Everything else — file
 > exploration, coding, command execution — works fully offline.

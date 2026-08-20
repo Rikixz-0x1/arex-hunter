@@ -188,6 +188,140 @@ func TestIsPlaceholderReply(t *testing.T) {
 	}
 }
 
+func TestEncodeDecode(t *testing.T) {
+	a := &Agent{}
+	for _, enc := range []string{"base64", "hex", "url"} {
+		code := a.encode(enc, "hello world")
+		if strings.HasPrefix(code, "error") {
+			t.Fatalf("encode %s failed: %s", enc, code)
+		}
+		dec := a.decode(enc, code)
+		if dec != "hello world" {
+			t.Errorf("decode(%s) = %q, want 'hello world'", enc, dec)
+		}
+	}
+	if got := a.encode("base64", "flag"); got != "ZmxhZw==" {
+		t.Errorf("base64 flag = %q", got)
+	}
+	if got := a.decode("base64", "ZmxhZw=="); got != "flag" {
+		t.Errorf("base64 decode = %q", got)
+	}
+	if !strings.Contains(a.encode("bogus", "x"), "error") {
+		t.Errorf("bad encode type should error")
+	}
+}
+
+func TestHashTool(t *testing.T) {
+	a := &Agent{}
+	got := a.hash("sha256", "arex")
+	if got != "sha256(arex) = 24b8ef58da66eed3e21873fba43c64c621bb67bfe8dcfdd5e550df08b4d4de33" {
+		t.Errorf("sha256(arex) = %q", got)
+	}
+	got = a.hash("md5", "hello")
+	if got != "md5(hello) = 5d41402abc4b2a76b9719d911017c592" {
+		t.Errorf("md5(hello) = %q", got)
+	}
+	if !strings.Contains(a.hash("sha3", "x"), "error") {
+		t.Errorf("bad algorithm should error")
+	}
+}
+
+func TestParsePortSpec(t *testing.T) {
+	ports, err := parsePortSpec("22,80,443")
+	if err != nil || len(ports) != 3 {
+		t.Fatalf("parsePortSpec(22,80,443) = %v, %v", ports, err)
+	}
+	ports, err = parsePortSpec("1-5")
+	if err != nil || len(ports) != 5 || ports[0] != 1 || ports[4] != 5 {
+		t.Fatalf("parsePortSpec(1-5) = %v, %v", ports, err)
+	}
+	if _, err := parsePortSpec("abc"); err == nil {
+		t.Fatalf("parsePortSpec(abc) should error")
+	}
+}
+
+func TestReverseShell(t *testing.T) {
+	a := &Agent{}
+	got := a.reverseShell("10.0.0.1", "4444", "bash")
+	if !strings.Contains(got, "/dev/tcp/10.0.0.1/4444") {
+		t.Errorf("bash reverse shell wrong: %s", got)
+	}
+	got = a.reverseShell("10.0.0.1", "4444", "powershell")
+	if !strings.Contains(got, "10.0.0.1") || !strings.Contains(got, "TCPClient") {
+		t.Errorf("powershell reverse shell wrong: %s", got)
+	}
+	got = a.reverseShell("10.0.0.1", "4444", "python")
+	if !strings.Contains(got, "python3") || !strings.Contains(got, "s.connect") {
+		t.Errorf("python reverse shell wrong: %s", got)
+	}
+	if !strings.Contains(a.reverseShell("10.0.0.1", "4444", "bogus"), "error") {
+		t.Errorf("bad platform should error")
+	}
+}
+
+func TestParseCVEJSON(t *testing.T) {
+	body := `{"vulnerabilities":[{"cve":{"id":"CVE-2025-24813","descriptions":[{"lang":"en","value":"Path Equivalence in Apache Tomcat leading to Remote Code Execution."}],"metrics":{"cvssMetricV31":[{"cvssData":{"baseScore":9.8,"baseSeverity":"CRITICAL","vectorString":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}}]},"published":"2025-02-10T18:15:00.000","references":[{"url":"https://nvd.nist.gov/vuln/detail/CVE-2025-24813"}]}}]}`
+	got := parseCVEJSON([]byte(body))
+	for _, want := range []string{"CVE-2025-24813", "CRITICAL", "9.8", "Apache Tomcat", "2025-02-10", "nvd.nist.gov"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("parseCVEJSON missing %q, got:\n%s", want, got)
+		}
+	}
+	if got := parseCVEJSON([]byte(`{"vulnerabilities":[]}`)); !strings.Contains(got, "no CVEs") {
+		t.Errorf("empty should say no CVEs, got: %s", got)
+	}
+}
+
+func TestCountUserSteps(t *testing.T) {
+	if got := countUserSteps("1) dns 2) whois 3) scan"); got != 3 {
+		t.Errorf("numbered steps = %d, want 3", got)
+	}
+	if got := countUserSteps("- dns\n- whois"); got != 2 {
+		t.Errorf("bullet steps = %d, want 2", got)
+	}
+	if got := countUserSteps("just tell me about dns and whois"); got != 0 {
+		t.Errorf("no list should be 0, got %d", got)
+	}
+}
+
+func TestParseGeoIP(t *testing.T) {
+	body := `{"status":"success","country":"United States","countryCode":"US","regionName":"California","city":"Mountain View","zip":"94043","lat":37.4223,"lon":-122.0848,"timezone":"America/Los_Angeles","isp":"Google LLC","org":"Google LLC","as":"AS15169 Google LLC","asname":"GOOGLE","reverse":"dns.google","mobile":false,"proxy":false,"hosting":true}`
+	got := parseGeoIP("8.8.8.8", []byte(body))
+	for _, want := range []string{"8.8.8.8", "Mountain View", "United States", "Google LLC", "AS15169", "hosting/datacenter", "dns.google"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("parseGeoIP missing %q, got:\n%s", want, got)
+		}
+	}
+	bad := parseGeoIP("1.1.1.1", []byte(`{"status":"fail","message":"reserved range"}`))
+	if !strings.Contains(bad, "reserved range") {
+		t.Errorf("parseGeoIP fail status wrong: %s", bad)
+	}
+}
+
+func TestWhoisServer(t *testing.T) {
+	ref := `% IANA WHOIS server
+refer:        whois.verisign-grs.com
+whois:        whois.verisign-grs.com
+domain:       COM`
+	if got := whoisServer(ref); got != "whois.verisign-grs.com" {
+		t.Errorf("whoisServer = %q, want whois.verisign-grs.com", got)
+	}
+	if got := whoisServer("% IANA WHOIS server\nnothing here"); got != "" {
+		t.Errorf("whoisServer with no refer = %q, want empty", got)
+	}
+}
+
+func TestCleanWhois(t *testing.T) {
+	raw := "% IANA WHOIS server\n% for more information\n\nDomain Name: EXAMPLE.COM\nRegistrar: Test Registrar Inc.\nCreation Date: 1992-01-01\n"
+	got := cleanWhois(raw)
+	if strings.Contains(got, "%") || !strings.Contains(got, "Registrar: Test Registrar Inc.") {
+		t.Errorf("cleanWhois output wrong:\n%s", got)
+	}
+	if cleanWhois("No match for domain") != "" {
+		t.Errorf("cleanWhois should return empty on no match")
+	}
+}
+
 func TestAgentFetchURLErrors(t *testing.T) {
 	a := &Agent{}
 	if got := a.fetchURL(""); !strings.Contains(got, "error") {

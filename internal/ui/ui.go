@@ -40,6 +40,7 @@ const (
 	kindUser msgKind = iota
 	kindAI
 	kindTool
+	kindToolResult
 	kindError
 )
 
@@ -92,10 +93,11 @@ type chunkMsg struct {
 	evalCount int64
 }
 type toolMsg struct {
-	name  string
-	args  string
-	start bool
-	err   error
+	name   string
+	args   string
+	result string
+	start  bool
+	err    error
 }
 type doneMsg struct {
 	reply   string
@@ -167,7 +169,7 @@ func (m *Model) agentCallbacks() agent.Callbacks {
 			m.program.Send(toolMsg{name: name, args: args, start: true})
 		},
 		OnToolDone: func(name, args, result string, err error) {
-			m.program.Send(toolMsg{name: name, args: args, err: err})
+			m.program.Send(toolMsg{name: name, args: args, result: result, err: err})
 		},
 	}
 }
@@ -318,6 +320,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.toolIdx >= 0 && m.toolIdx < len(m.items) {
 			m.updateItem(m.toolIdx, item{kind: kindTool, raw: shown})
+			if msg.result != "" && msg.err == nil {
+				m.appendItem(item{kind: kindToolResult, raw: truncateStr(msg.result, 800)})
+			}
 		}
 		return m, nil
 
@@ -450,7 +455,17 @@ func toolsReply() string {
 		"- `http_request` - custom HTTP calls (GET/POST/PUT/DELETE) for API & web app testing\n" +
 		"- `learn` / `recall` - long-term memory (.arex-memory.md)\n" +
 		"- `system_info` - OS, shell, installed tools\n" +
-		"- `project_info` - project manifest & dependencies"
+		"- `project_info` - project manifest & dependencies\n" +
+		"- `encode` / `decode` - base64, hex, url - payload crafting & CTF flags\n" +
+		"- `hash` - md5/sha1/sha256/sha512\n" +
+		"- `dns_lookup` - A, MX, TXT, NS, CNAME records\n" +
+		"- `whois` - domain registration & OSINT\n" +
+		"- `port_scan` - TCP scan (common ports or custom range)\n" +
+		"- `reverse_shell` - payload generator for authorized tests\n" +
+		"- `cve_lookup` - NVD vulnerability database (CVE IDs or keywords)\n" +
+		"- `subdomain_scan` - DNS brute-force of common subdomains\n" +
+		"- `geoip` - IP geolocation, ISP, ASN (OSINT)\n" +
+		"- `security_headers` - HTTP security header audit"
 }
 
 func (m *Model) send(text string) tea.Cmd {
@@ -505,6 +520,8 @@ func (m *Model) renderItem(it item) string {
 		return aiLabelStyle.Render("◆ arex") + "\n" + out
 	case kindTool:
 		return toolStyle.Render(it.raw)
+	case kindToolResult:
+		return toolResultStyle.Render("↳ " + it.raw)
 	case kindError:
 		return errStyle.Render("✖ " + it.raw)
 	}
