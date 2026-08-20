@@ -487,7 +487,7 @@ func toolsReply() string {
 		"- `dns_lookup` - A, MX, TXT, NS, CNAME records\n" +
 		"- `whois` - domain registration & OSINT\n" +
 		"- `port_scan` - TCP scan (common ports or custom range)\n" +
-		"- `reverse_shell` - payload generator for authorized tests\n" +
+		"- `reverse_shell` - payload generator\n" +
 		"- `cve_lookup` - NVD vulnerability database (CVE IDs or keywords)\n" +
 		"- `subdomain_scan` - DNS brute-force of common subdomains\n" +
 		"- `geoip` - IP geolocation, ISP, ASN (OSINT)\n" +

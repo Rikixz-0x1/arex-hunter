@@ -12,7 +12,7 @@ import (
 	"arex/internal/ui"
 )
 
-var version = "0.3.0"
+var version = "0.4.0"
 
 func main() {
 	model := flag.String("model", "qwen2.5-coder:3b", "ollama model to use")
