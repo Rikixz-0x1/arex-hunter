@@ -361,6 +361,67 @@ var ToolDefs = []ollama.Tool{
 	{
 		Type: "function",
 		Function: ollama.Function{
+			Name:        "vuln_report",
+			Description: "Write a professional vulnerability assessment report to a markdown file. Provide the report title, target, and the findings you discovered (as a JSON array of objects with: title, severity, cvss, affected, description, poc, impact, remediation, references). The report includes an executive summary, findings table, detailed findings with PoC, and recommendations. Use after completing a security assessment to deliver a written report.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"title":    map[string]any{"type": "string", "description": "Report title, e.g. 'Security Assessment of example.com'"},
+					"target":   map[string]any{"type": "string", "description": "Target of the assessment, e.g. example.com or 10.10.10.5"},
+					"findings": map[string]any{"type": "string", "description": "JSON array of findings. Each: {\"title\":\"...\",\"severity\":\"High\",\"cvss\":\"8.1\",\"affected\":\"...\",\"description\":\"...\",\"poc\":\"...\",\"impact\":\"...\",\"remediation\":\"...\",\"references\":[\"...\"]}"},
+				},
+				"required": []string{"title", "target"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ollama.Function{
+			Name:        "log_finding",
+			Description: "Append a finding or recon note to the research log (.arex-findings.md in the working directory). Accumulate findings during an assessment, then generate the final report with vuln_report.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target":   map[string]any{"type": "string", "description": "Target host/url the finding applies to"},
+					"severity": map[string]any{"type": "string", "description": "Critical, High, Medium, Low or Info"},
+					"title":    map[string]any{"type": "string", "description": "Short finding title"},
+					"detail":   map[string]any{"type": "string", "description": "Details: what was found, evidence, affected component"},
+				},
+				"required": []string{"target", "severity", "title"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ollama.Function{
+			Name:        "find_files",
+			Description: "Find files anywhere in the working directory by name pattern (glob). E.g. '*.conf', '*.env', 'config*', '*secret*', '*.php'. Skips .git and node_modules. Use for recon on codebases: configs, keys, backups, interesting files.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{"type": "string", "description": "Glob pattern matching file names, e.g. '*.conf' or '*backup*'"},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ollama.Function{
+			Name:        "dir_scan",
+			Description: "Enumerate common web paths and files on a target web server (authorized targets only): admin panels, API endpoints, .git exposure, backup files, config leaks, phpmyadmin, wp-admin, swagger, env files. Sends GET requests to ~70 common paths and reports which exist. Use for web app recon before testing.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"url": map[string]any{"type": "string", "description": "Base URL to scan, e.g. https://example.com"},
+				},
+				"required": []string{"url"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ollama.Function{
 			Name:        "learn",
 			Description: "Store a note in AREX's long-term memory (file .arex-memory.md in the working directory). Use to remember user preferences, project quirks, known-good commands, facts learned about the target, or anything useful for future sessions. This makes AREX smarter over time.",
 			Parameters: map[string]any{
@@ -505,6 +566,12 @@ func (a *Agent) Run(ctx context.Context, history []ollama.Message) (string, []ol
 				resp.Content = cleaned
 			}
 		}
+		if len(resp.ToolCalls) == 0 {
+			if call, cleaned := matchBareToolCall(resp.Content); call != nil {
+				resp.ToolCalls = []ollama.ToolCall{*call}
+				resp.Content = cleaned
+			}
+		}
 		msgs = append(msgs, resp)
 		if len(resp.ToolCalls) == 0 {
 			if usedTool && isPlaceholderReply(resp.Content) && nudges < 2 {
@@ -565,37 +632,41 @@ func toolError(text string) error {
 }
 
 func (a *Agent) execTool(name, rawArgs string) string {
-	var args map[string]string
+	var args map[string]any
 	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
 		return "error: invalid tool arguments: " + err.Error()
 	}
+	arg := func(key string) string {
+		v, _ := args[key].(string)
+		return v
+	}
 	switch name {
 	case "list_dir":
-		dir := args["dir"]
+		dir := arg("dir")
 		if dir == "" {
 			dir = "."
 		}
 		return a.listDir(dir)
 	case "read_file":
-		return a.readFile(args["path"])
+		return a.readFile(arg("path"))
 	case "write_file":
-		return a.writeFile(args["path"], args["content"])
+		return a.writeFile(arg("path"), arg("content"))
 	case "run_command":
-		return a.runCommand(args["command"])
+		return a.runCommand(arg("command"))
 	case "run_elevated":
-		return a.runElevated(args["command"])
+		return a.runElevated(arg("command"))
 	case "web_search":
-		return a.webSearch(args["query"])
+		return a.webSearch(arg("query"))
 	case "fetch_url":
-		return a.fetchURL(args["url"])
+		return a.fetchURL(arg("url"))
 	case "mkdir":
-		return a.mkdir(args["path"])
+		return a.mkdir(arg("path"))
 	case "grep":
-		return a.grep(args["pattern"])
+		return a.grep(arg("pattern"))
 	case "cd":
-		return a.cd(args["path"])
+		return a.cd(arg("path"))
 	case "learn":
-		return a.learn(args["note"])
+		return a.learn(arg("note"))
 	case "recall":
 		return a.recall()
 	case "system_info":
@@ -605,27 +676,35 @@ func (a *Agent) execTool(name, rawArgs string) string {
 	case "http_request":
 		return a.httpRequest(rawArgs)
 	case "encode":
-		return a.encode(args["type"], args["data"])
+		return a.encode(arg("type"), arg("data"))
 	case "decode":
-		return a.decode(args["type"], args["data"])
+		return a.decode(arg("type"), arg("data"))
 	case "hash":
-		return a.hash(args["algorithm"], args["data"])
+		return a.hash(arg("algorithm"), arg("data"))
 	case "dns_lookup":
-		return a.dnsLookup(args["domain"], args["type"])
+		return a.dnsLookup(arg("domain"), arg("type"))
 	case "whois":
-		return a.whois(args["target"])
+		return a.whois(arg("target"))
 	case "port_scan":
-		return a.portScan(args["host"], args["ports"])
+		return a.portScan(arg("host"), arg("ports"))
 	case "reverse_shell":
-		return a.reverseShell(args["ip"], args["port"], args["platform"])
+		return a.reverseShell(arg("ip"), arg("port"), arg("platform"))
 	case "cve_lookup":
-		return a.cveLookup(args["query"])
+		return a.cveLookup(arg("query"))
 	case "subdomain_scan":
-		return a.subdomainScan(args["domain"])
+		return a.subdomainScan(arg("domain"))
 	case "geoip":
-		return a.geoIP(args["ip"])
+		return a.geoIP(arg("ip"))
 	case "security_headers":
-		return a.securityHeaders(args["url"])
+		return a.securityHeaders(arg("url"))
+	case "vuln_report":
+		return a.vulnReport(rawArgs)
+	case "log_finding":
+		return a.logFinding(arg("target"), arg("severity"), arg("title"), arg("detail"))
+	case "find_files":
+		return a.findFiles(arg("pattern"))
+	case "dir_scan":
+		return a.dirScan(arg("url"))
 	default:
 		return fmt.Sprintf("error: unknown tool %q. Available tools: %s. Use one of these instead.", name, toolNames())
 	}
@@ -1851,6 +1930,310 @@ func (a *Agent) securityHeaders(rawURL string) string {
 	return truncate(sb.String(), MaxToolOutput)
 }
 
+type reportFinding struct {
+	Title       string   `json:"title"`
+	Severity    string   `json:"severity"`
+	CVSS        string   `json:"cvss"`
+	Affected    string   `json:"affected"`
+	Description string   `json:"description"`
+	PoC         string   `json:"poc"`
+	Impact      string   `json:"impact"`
+	Remediation string   `json:"remediation"`
+	References  []string `json:"references"`
+}
+
+func (a *Agent) vulnReport(rawArgs string) string {
+	var args struct {
+		Title    string          `json:"title"`
+		Target   string          `json:"target"`
+		Findings []reportFinding `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
+		return "error: invalid report arguments: " + err.Error()
+	}
+	if args.Title == "" {
+		args.Title = "Security Assessment Report"
+	}
+	if args.Target == "" {
+		return "error: missing 'target' argument"
+	}
+	findings := args.Findings
+	if len(findings) == 0 {
+		findings = parseFindingsFile(filepath.Join(a.workdir, ".arex-findings.md"))
+	}
+	now := time.Now()
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# %s\n\n", args.Title)
+	sb.WriteString("**Target:** " + args.Target + "\n")
+	fmt.Fprintf(&sb, "**Date:** %s\n", now.Format("2006-01-02"))
+	sb.WriteString("**Reporter:** AREX (generated on request)\n")
+	sb.WriteString("**Classification:** Confidential\n\n---\n\n")
+	sb.WriteString("## 1. Executive Summary\n\n")
+	sb.WriteString("An automated security assessment was performed against the target. ")
+	fmt.Fprintf(&sb, "A total of **%d finding(s)** were identified:\n\n", len(findings))
+	sevCount := map[string]int{}
+	for _, f := range findings {
+		sev := strings.ToLower(strings.TrimSpace(f.Severity))
+		if sev == "" {
+			sev = "info"
+		}
+		sevCount[sev]++
+	}
+	order := []string{"critical", "high", "medium", "low", "info"}
+	for _, s := range order {
+		if n := sevCount[s]; n > 0 {
+			sb.WriteString(fmt.Sprintf("- %s: %d\n", strings.Title(s), n))
+		}
+	}
+	sb.WriteString("\n---\n\n## 2. Scope & Methodology\n\n")
+	sb.WriteString("- **Target:** " + args.Target + "\n")
+	sb.WriteString("- **Methodology:** OSINT (DNS, WHOIS, subdomain enumeration, geoip), active recon (port scan, web directory enumeration), vulnerability research (NVD), manual verification\n")
+	sb.WriteString("- **Tools:** AREX - local AI agent (khmersec.com / rikixz.dev)\n\n---\n\n")
+	sb.WriteString("## 3. Findings Summary\n\n| ID | Severity | CVSS | Title |\n|----|----------|------|-------|\n")
+	for i, f := range findings {
+		sev := f.Severity
+		if sev == "" {
+			sev = "Info"
+		}
+		cvss := f.CVSS
+		if cvss == "" {
+			cvss = "-"
+		}
+		fmt.Fprintf(&sb, "| F-%02d | %s | %s | %s |\n", i+1, sev, cvss, f.Title)
+	}
+	sb.WriteString("\n---\n\n## 4. Detailed Findings\n\n")
+	for i, f := range findings {
+		fmt.Fprintf(&sb, "### 4.%d %s\n\n", i+1, f.Title)
+		fmt.Fprintf(&sb, "- **Severity:** %s\n", orDefault(f.Severity, "Info"))
+		fmt.Fprintf(&sb, "- **CVSS:** %s\n", orDefault(f.CVSS, "N/A"))
+		fmt.Fprintf(&sb, "- **Affected component:** %s\n\n", orDefault(f.Affected, "N/A"))
+		sb.WriteString("**Description**\n\n" + f.Description + "\n\n")
+		if f.PoC != "" {
+			sb.WriteString("**Proof of Concept**\n\n```\n" + f.PoC + "\n```\n\n")
+		}
+		sb.WriteString("**Impact**\n\n" + orDefault(f.Impact, "Potential unauthorized access, data exposure, or service compromise.") + "\n\n")
+		sb.WriteString("**Remediation**\n\n" + orDefault(f.Remediation, "Apply vendor patches, follow OWASP guidance, and review the affected configuration.") + "\n\n")
+		if len(f.References) > 0 {
+			sb.WriteString("**References**\n\n")
+			for _, r := range f.References {
+				sb.WriteString("- " + r + "\n")
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString("---\n\n")
+	}
+	sb.WriteString("## 5. Recommendations\n\n")
+	sb.WriteString("1. Apply patches and updates for all affected components.\n")
+	sb.WriteString("2. Fix the issues in order of severity - Critical and High first.\n")
+	sb.WriteString("3. Re-test after remediation to confirm the fixes.\n")
+	sb.WriteString("4. Review exposed services and reduce the attack surface.\n\n---\n\n")
+	sb.WriteString("*Report generated by AREX - Rikixz · khmersec.com · rikixz.dev*\n")
+
+	path := filepath.Join(a.workdir, fmt.Sprintf("vuln-report-%s.md", now.Format("20060102-150405")))
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		return "error: " + err.Error()
+	}
+	return "Report written to " + path + " (" + fmt.Sprint(len(findings)) + " findings)"
+}
+
+func orDefault(s, def string) string {
+	if strings.TrimSpace(s) == "" {
+		return def
+	}
+	return s
+}
+
+func (a *Agent) logFinding(target, severity, title, detail string) string {
+	if target == "" || severity == "" || title == "" {
+		return "error: 'target', 'severity' and 'title' are required"
+	}
+	severity = strings.Title(strings.ToLower(strings.TrimSpace(severity)))
+	entry := fmt.Sprintf("\n## [%s] %s\n- target: %s\n- date: %s\n", severity, strings.TrimSpace(title), target, time.Now().Format("2006-01-02"))
+	if detail != "" {
+		entry += "- detail: " + strings.TrimSpace(detail) + "\n"
+	}
+	f, err := os.OpenFile(filepath.Join(a.workdir, ".arex-findings.md"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	defer f.Close()
+	if _, err := f.WriteString(entry); err != nil {
+		return "error: " + err.Error()
+	}
+	return "Finding logged: [" + severity + "] " + title
+}
+
+// parseFindingsFile reads findings accumulated with log_finding back into structured findings.
+func parseFindingsFile(path string) []reportFinding {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var findings []reportFinding
+	var cur *reportFinding
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "## [") {
+			sevEnd := strings.Index(line, "]")
+			sev := strings.TrimPrefix(line[3:sevEnd], "[")
+			title := strings.TrimSpace(line[sevEnd+1:])
+			findings = append(findings, reportFinding{Severity: sev, Title: title})
+			cur = &findings[len(findings)-1]
+			continue
+		}
+		if cur == nil {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(line, "- target: "); ok {
+			cur.Affected = rest
+		} else if rest, ok := strings.CutPrefix(line, "- detail: "); ok {
+			cur.Description = rest
+		} else if rest, ok := strings.CutPrefix(line, "- date: "); ok {
+			// ignore
+			_ = rest
+		}
+	}
+	return findings
+}
+
+func (a *Agent) findFiles(pattern string) string {
+	if pattern == "" {
+		return "error: missing 'pattern' argument"
+	}
+	var results []string
+	_ = filepath.Walk(a.workdir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case ".git", "node_modules", "vendor", ".venv", "venv", "dist", "build":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		base := info.Name()
+		match, _ := filepath.Match(pattern, base)
+		if !match {
+			if strings.Contains(base, pattern) {
+				match = true
+			}
+		}
+		if match {
+			rel, _ := filepath.Rel(a.workdir, path)
+			results = append(results, rel)
+		}
+		return nil
+	})
+	if len(results) == 0 {
+		return "no files matched pattern: " + pattern
+	}
+	if len(results) > 50 {
+		results = results[:50]
+	}
+	return fmt.Sprintf("%d file(s) matching %q:\n%s", len(results), pattern, strings.Join(results, "\n"))
+}
+
+var commonWebPaths = []string{
+	"/", "/robots.txt", "/sitemap.xml", "/favicon.ico", "/index.php", "/index.html",
+	"/admin", "/admin/", "/administrator", "/administrator/", "/adminer", "/adminer.php",
+	"/login", "/login.php", "/logon", "/signin", "/signup", "/register", "/account",
+	"/user", "/users", "/profile", "/dashboard", "/portal", "/console",
+	"/api", "/api/", "/api/v1", "/api/v2", "/api/v3", "/v1", "/v2", "/graphql",
+	"/swagger", "/swagger-ui.html", "/swagger-ui/", "/swagger/index.html", "/api-docs",
+	"/openapi.json", "/health", "/healthz", "/status", "/actuator", "/actuator/health",
+	"/env", "/debug", "/test", "/tests", "/docs", "/documentation", "/documentation/",
+	"/wp-admin", "/wp-admin/", "/wp-login.php", "/wp-content/", "/wp-json/",
+	"/phpmyadmin", "/phpmyadmin/", "/pma/", "/myadmin", "/mysql", "/dbadmin",
+	"/.git/", "/.git/config", "/.git/HEAD", "/.env", "/.env.backup", "/.htaccess",
+	"/.htpasswd", "/config", "/config.php", "/configuration.php", "/config.yml",
+	"/settings", "/admin/config", "/backup", "/backup.zip", "/backup.tar.gz",
+	"/dump.sql", "/database.sql", "/db.sql", "/data.sql", "/uploads", "/uploads/",
+	"/images", "/images/", "/assets", "/assets/", "/static", "/static/", "/media/",
+	"/files", "/files/", "/downloads", "/downloads/", "/tmp", "/temp", "/logs", "/log",
+	"/server-status", "/server-info", "/cgi-bin/", "/web.config", "/package.json",
+	"/composer.json", "/Dockerfile", "/docker-compose.yml", "/README.md",
+	"/manager", "/jenkins", "/jira", "/confluence", "/gitlab", "/grafana", "/kibana",
+	"/node_modules/", "/vendor/", "/src/", "/public/", "/app", "/application",
+	"/web", "/site", "/cms", "/joomla", "/drupal", "/moodle", "/shop", "/store",
+	"/cart", "/checkout", "/payment", "/billing", "/oauth", "/token", "/callback",
+	"/webhook", "/upload", "/upload.php", "/download.php", "/file.php", "/shell",
+	"/cmd", "/exec", "/eval", "/wget", "/proxy", "/redirect", "/mail", "/webmail",
+	"/owa", "/exchange", "/autodiscover", "/autoconfig", "/vpn", "/remote",
+	"/ssh", "/rdp", "/ftp", "/telnet", "/smb", "/svn", "/.svn/", "/.svn/entries",
+	"/.hg/", "/.bzr/", "/.DS_Store", "/.listing", "/server.php",
+}
+
+func (a *Agent) dirScan(baseURL string) string {
+	if baseURL == "" {
+		return "error: missing 'url' argument"
+	}
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "https://" + baseURL
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	var mu sync.Mutex
+	type hit struct {
+		path string
+		code int
+		size int
+	}
+	var hits []hit
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10)
+	client := &http.Client{Timeout: 8 * time.Second}
+	for _, p := range commonWebPaths {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
+			if err != nil {
+				return
+			}
+			req.Header.Set("User-Agent", userAgent)
+			resp, err := client.Do(req)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			code := resp.StatusCode
+			if code == 404 || code == 410 || (code >= 500 && code < 600) {
+				return
+			}
+			mu.Lock()
+			hits = append(hits, hit{path: path, code: code, size: len(body)})
+			mu.Unlock()
+		}(p)
+	}
+	wg.Wait()
+	sort.Slice(hits, func(i, j int) bool { return hits[i].code < hits[j].code })
+
+	if len(hits) == 0 {
+		return fmt.Sprintf("no interesting paths found on %s (%d paths checked, all 404/500)", baseURL, len(commonWebPaths))
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d paths found on %s:\n", len(hits), baseURL)
+	for _, h := range hits {
+		label := "?"
+		switch h.code {
+		case 200:
+			label = "found"
+		case 301, 302, 303, 307, 308:
+			label = "redirect"
+		case 401:
+			label = "auth required"
+		case 403:
+			label = "forbidden (exists)"
+		}
+		fmt.Fprintf(&sb, "  %d %s %s (%d bytes)\n", h.code, label, h.path, h.size)
+	}
+	return truncate(sb.String(), MaxToolOutput)
+}
+
 func (a *Agent) tryRun(command string) (string, bool) {
 	out := a.runCommand(command)
 	if strings.HasPrefix(out, "error:") {
@@ -2444,6 +2827,101 @@ func stripHTML(s string) string {
 	s = strings.ReplaceAll(s, "\n ", "\n")
 	s = reBlank.ReplaceAllString(s, "\n\n")
 	return strings.TrimSpace(s)
+}
+
+// matchBareToolCall finds a JSON object in content that matches a single tool's
+// argument signature (no name/arguments wrapper) and turns it into a ToolCall.
+// Handles models that emit just the payload, e.g. {"title":..., "target":...}.
+func matchBareToolCall(content string) (*ollama.ToolCall, string) {
+	rest := content
+	for len(rest) > 0 {
+		idx := strings.IndexByte(rest, '{')
+		if idx < 0 {
+			break
+		}
+		rest = rest[idx:]
+		depth := 0
+		inStr := false
+		esc := false
+		end := -1
+		for i := 0; i < len(rest); i++ {
+			c := rest[i]
+			if inStr {
+				if esc {
+					esc = false
+					continue
+				}
+				if c == '\\' {
+					esc = true
+					continue
+				}
+				if c == '"' {
+					inStr = false
+				}
+				continue
+			}
+			switch c {
+			case '"':
+				inStr = true
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = i + 1
+					i = len(rest)
+				}
+			}
+		}
+		if end < 0 {
+			break
+		}
+		obj := rest[:end]
+		rest = rest[end:]
+		var m map[string]any
+		if err := json.Unmarshal([]byte(fixJSONEscapes(obj)), &m); err != nil || len(m) == 0 {
+			continue
+		}
+		if _, hasName := m["name"]; hasName {
+			continue
+		}
+		for _, td := range ToolDefs {
+			props, _ := td.Function.Parameters["properties"].(map[string]any)
+			reqList, _ := td.Function.Parameters["required"].([]any)
+			required := map[string]bool{}
+			for _, r := range reqList {
+				if s, ok := r.(string); ok {
+					required[s] = true
+				}
+			}
+			ok := true
+			for k := range m {
+				if _, known := props[k]; !known {
+					ok = false
+					break
+				}
+			}
+			if !ok {
+				continue
+			}
+			for r := range required {
+				if _, present := m[r]; !present {
+					ok = false
+					break
+				}
+			}
+			if !ok {
+				continue
+			}
+			argsJSON, _ := json.Marshal(m)
+			tc := &ollama.ToolCall{Function: struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			}{Name: td.Function.Name, Arguments: json.RawMessage(argsJSON)}}
+			return tc, stripFences(strings.Replace(content, obj, "", 1))
+		}
+	}
+	return nil, content
 }
 
 func parseJSONToolCalls(content string) ([]ollama.ToolCall, string) {

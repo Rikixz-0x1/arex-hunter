@@ -2,6 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -319,6 +321,149 @@ func TestCleanWhois(t *testing.T) {
 	}
 	if cleanWhois("No match for domain") != "" {
 		t.Errorf("cleanWhois should return empty on no match")
+	}
+}
+
+func TestMatchBareToolCall(t *testing.T) {
+	content := "```json\n{\"title\":\"Assessment\",\"target\":\"example.com\",\"findings\":[{\"title\":\"X\",\"severity\":\"High\",\"cvss\":\"8.1\"}]}\n```"
+	tc, cleaned := matchBareToolCall(content)
+	if tc == nil {
+		t.Fatal("expected bare tool call match")
+	}
+	if tc.Function.Name != "vuln_report" {
+		t.Errorf("expected vuln_report, got %q", tc.Function.Name)
+	}
+	if !strings.Contains(string(tc.Function.Arguments), "Assessment") {
+		t.Errorf("arguments missing payload: %s", tc.Function.Arguments)
+	}
+	if strings.Contains(cleaned, "{") {
+		t.Errorf("payload should be removed from cleaned content: %q", cleaned)
+	}
+
+	tc2, _ := matchBareToolCall(`{"pattern":"*.env"}`)
+	if tc2 == nil {
+		t.Fatal("expected pattern match")
+	}
+	switch tc2.Function.Name {
+	case "grep", "find_files":
+	default:
+		t.Errorf("unexpected tool for pattern payload: %q", tc2.Function.Name)
+	}
+
+	tc3, _ := matchBareToolCall(`{"url":"https://x.com"}`)
+	if tc3 == nil {
+		t.Fatal("expected url match")
+	}
+	switch tc3.Function.Name {
+	case "security_headers", "http_request", "dir_scan", "fetch_url":
+	default:
+		t.Errorf("unexpected tool for url payload: %q", tc3.Function.Name)
+	}
+
+	if tc4, _ := matchBareToolCall("plain text with no json"); tc4 != nil {
+		t.Errorf("plain text should not match: %+v", tc4)
+	}
+}
+
+func TestParseFindingsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".arex-findings.md")
+	content := `# Findings
+
+## [High] SQL Injection in login
+- target: example.com/login.php
+- date: 2026-08-20
+- detail: Parameter id is concatenated into the query.
+
+## [Critical] RCE in file upload
+- target: example.com/upload.php
+- detail: Unrestricted file upload allows .php execution.`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	findings := parseFindingsFile(path)
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings, got %d", len(findings))
+	}
+	if findings[0].Severity != "High" || findings[0].Title != "SQL Injection in login" {
+		t.Errorf("finding 0 wrong: %+v", findings[0])
+	}
+	if !strings.Contains(findings[0].Description, "concatenated") {
+		t.Errorf("finding 0 description wrong: %+v", findings[0])
+	}
+	if findings[1].Severity != "Critical" || !strings.Contains(findings[1].Description, "upload") {
+		t.Errorf("finding 1 wrong: %+v", findings[1])
+	}
+}
+
+func TestVulnReport(t *testing.T) {
+	dir := t.TempDir()
+	a := &Agent{workdir: dir}
+	args := `{"title":"Assessment of example.com","target":"example.com","findings":[{"title":"SQL Injection","severity":"High","cvss":"8.1","affected":"example.com/login","description":"Injectable parameter","poc":"' OR 1=1--","impact":"Data leak","remediation":"Use prepared statements","references":["https://owasp.org"]}]}`
+	got := a.vulnReport(args)
+	if !strings.HasPrefix(got, "error") {
+		found := false
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "vuln-report-") {
+				data, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+				s := string(data)
+				for _, want := range []string{"Assessment of example.com", "example.com", "SQL Injection", "High", "8.1", "prepared statements", "owasp.org", "Executive Summary", "Recommendations"} {
+					if !strings.Contains(s, want) {
+						t.Errorf("report missing %q", want)
+					}
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Error("no report file written")
+		}
+	} else {
+		t.Errorf("vulnReport failed: %s", got)
+	}
+}
+
+func TestVulnReportEmptyFindings(t *testing.T) {
+	dir := t.TempDir()
+	a := &Agent{workdir: dir}
+	got := a.vulnReport(`{"title":"T","target":"x.com","findings":[]}`)
+	if strings.HasPrefix(got, "error") {
+		t.Fatalf("vulnReport failed: %s", got)
+	}
+	if !strings.Contains(got, "0 findings") {
+		t.Errorf("expected 0 findings note, got: %s", got)
+	}
+}
+
+func TestFindFiles(t *testing.T) {
+	dir := t.TempDir()
+	a := &Agent{workdir: dir}
+	os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "app.conf"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("x"), 0o644)
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+	os.WriteFile(filepath.Join(dir, "sub", "secret.env"), []byte("x"), 0o644)
+
+	got := a.findFiles("*.conf")
+	if !strings.Contains(got, "app.conf") || strings.Contains(got, "main.go") {
+		t.Errorf("findFiles *.conf wrong: %s", got)
+	}
+	got = a.findFiles("*secret*")
+	if !strings.Contains(got, "secret.env") {
+		t.Errorf("findFiles *secret* wrong: %s", got)
+	}
+	if got := a.findFiles(""); !strings.Contains(got, "error") {
+		t.Errorf("empty pattern should error")
+	}
+}
+
+func TestCommonWebPaths(t *testing.T) {
+	joined := strings.Join(commonWebPaths, "\n")
+	for _, want := range []string{"/admin", "/.git/config", "/wp-login.php", "/phpmyadmin", "/.env", "/actuator", "/graphql", "/robots.txt", "/backup.zip"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("commonWebPaths missing %q", want)
+		}
 	}
 }
 

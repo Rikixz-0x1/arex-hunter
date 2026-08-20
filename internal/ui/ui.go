@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -395,6 +396,25 @@ func (m *Model) selectModel(name string) {
 	m.appendItem(item{kind: kindAI, raw: "Switched model to **" + name + "**."})
 }
 
+func (m *Model) exportSession() (string, error) {
+	dir := m.cfg.Dir
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	path := filepath.Join(dir, fmt.Sprintf("arex-session-%s.md", time.Now().Format("20060102-150405")))
+	var sb strings.Builder
+	sb.WriteString("# AREX session transcript\n\n")
+	fmt.Fprintf(&sb, "**Model:** %s · **Host:** %s · **Dir:** %s\n\n---\n\n", m.cfg.Model, m.cfg.Host, dir)
+	for _, it := range m.items {
+		sb.WriteString(m.renderItem(it))
+		sb.WriteString("\n\n---\n\n")
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func (m *Model) resetSession() {
 	m.items, m.rendered = nil, nil
 	m.history = nil
@@ -425,6 +445,12 @@ func (m *Model) handleSlash(text string) tea.Cmd {
 		m.appendItem(item{kind: kindAI, raw: toolsReply()})
 	case "/tokens":
 		m.appendItem(item{kind: kindAI, raw: fmt.Sprintf("session tokens: %s prompt + %s output = **%s** total", fmtTokens(m.totalPrompt), fmtTokens(m.totalEval), fmtTokens(m.totalPrompt+m.totalEval))})
+	case "/export":
+		if p, err := m.exportSession(); err != nil {
+			m.appendItem(item{kind: kindError, raw: "export failed: " + err.Error()})
+		} else {
+			m.appendItem(item{kind: kindAI, raw: "Session exported to `" + p + "`"})
+		}
 	case "/version":
 		m.appendItem(item{kind: kindAI, raw: "**arex** " + m.cfg.Version})
 	case "/host":
@@ -465,7 +491,12 @@ func toolsReply() string {
 		"- `cve_lookup` - NVD vulnerability database (CVE IDs or keywords)\n" +
 		"- `subdomain_scan` - DNS brute-force of common subdomains\n" +
 		"- `geoip` - IP geolocation, ISP, ASN (OSINT)\n" +
-		"- `security_headers` - HTTP security header audit"
+		"- `security_headers` - HTTP security header audit\n" +
+		"- `vuln_report` - generate a professional vulnerability assessment report\n" +
+		"- `log_finding` - append findings to the research log (.arex-findings.md)\n" +
+		"- `find_files` - find files by name pattern across the workspace\n" +
+		"- `dir_scan` - enumerate common web paths (admin, .git, backups, config leaks)\n" +
+		"- `/export` - save this session transcript to a markdown file"
 }
 
 func (m *Model) send(text string) tea.Cmd {

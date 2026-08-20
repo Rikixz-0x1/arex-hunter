@@ -35,7 +35,7 @@ offline or working in a locked-down environment.
 
 - **Streaming TUI** — glamour-rendered markdown, live token/s rate, spinner,
   tool results shown in-chat so you always see the raw ground truth
-- **26 tools** — file ops, regex search, shell, web research, recon
+- **30 tools** — file ops, regex search, shell, web research, recon
   (DNS/WHOIS/port scan/subdomain/geoip/CVE), payload generation,
   encoding/hashing, HTTP testing, memory
 - **Slash commands** — `/model`, `/tools`, `/tokens`, `/new`, `/host`, `/exit`, ...
@@ -119,6 +119,7 @@ go build -o arex.exe .
 | `/model <name>` | Switch model instantly (bare `/model` opens the picker) |
 | `/tools` | List available tools |
 | `/tokens` | Show token usage for this session |
+| `/export` | Save the full session transcript to `arex-session-<timestamp>.md` |
 | `/new`, `/clear` | Clear the session |
 | `/host` | Show Ollama host, model and working dir |
 | `/version` | Show AREX version |
@@ -154,6 +155,10 @@ go build -o arex.exe .
 | `subdomain_scan` | DNS brute-force of 130+ common subdomains (admin, api, dev, vpn, git...) |
 | `geoip` | IP geolocation: country, city, ISP, org, ASN, proxy/hosting flags |
 | `security_headers` | HTTP security header audit (HSTS, CSP, XFO, COOP/CORP...) |
+| `vuln_report` | Generates a professional markdown assessment report (executive summary, findings table with severity/CVSS, detailed findings with PoC & remediation, recommendations) — from findings you pass or the research log |
+| `log_finding` | Appends a finding to `.arex-findings.md` during an assessment; `vuln_report` picks these up automatically |
+| `find_files` | Finds files by name pattern anywhere in the workspace (configs, keys, backups, interesting files) |
+| `dir_scan` | Enumerates ~180 common web paths (admin panels, `.git` exposure, `.env`, phpMyAdmin, backups, config leaks, Swagger/GraphQL) and reports which exist |
 
 > Only `web_search` and `fetch_url` need internet. Everything else — file
 > exploration, coding, command execution — works fully offline.
@@ -182,6 +187,10 @@ Guards include:
   off)*`
 - **Long-term memory** — facts saved with `learn` are loaded into every future
   session, so AREX gets smarter about your project and preferences over time
+- **Vulnerability reporting** — log findings with `log_finding` during an
+  assessment, then `vuln_report` writes a professional markdown report
+  (executive summary, severity/CVSS table, PoC, remediation, recommendations)
+  with everything you logged
 
 ## Tips
 
